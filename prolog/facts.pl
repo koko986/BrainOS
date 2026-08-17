@@ -1,0 +1,9 @@
+:- dynamic project/1.
+:- dynamic task/1.
+:- dynamic file/1.
+:- dynamic note/1.
+:- dynamic topic/1.
+:- dynamic technology/1.
+:- dynamic active/1.
+:- dynamic deadline_soon/1.
+
