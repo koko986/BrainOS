@@ -41,4 +41,3 @@ pytest
 
 If SWI-Prolog or PySWIP is not installed, Prolog integration tests are skipped
 with a clear reason.
-
