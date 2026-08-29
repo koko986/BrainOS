@@ -40,13 +40,16 @@ CREATE INDEX IF NOT EXISTS idx_relationships_type ON relationships(type);
 
 def connect(database_path: Path) -> sqlite3.Connection:
     database_path.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(database_path)
+    connection = sqlite3.connect(database_path, timeout=30.0)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
+    connection.execute("PRAGMA journal_mode = WAL")
+    connection.execute("PRAGMA busy_timeout = 30000")
     return connection
 
 
 def initialize_database(database_path: Path) -> None:
     with connect(database_path) as connection:
         connection.executescript(SCHEMA)
+
 

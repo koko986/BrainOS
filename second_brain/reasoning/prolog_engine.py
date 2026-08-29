@@ -11,7 +11,7 @@ from second_brain.database.models import Entity, Relationship
 
 
 SAFE_ATOM_RE = re.compile(r"^[a-z][a-z0-9_]*$")
-SUPPORTED_RELATIONSHIPS = {"belongs_to", "uses", "depends_on"}
+SUPPORTED_RELATIONSHIPS = {"belongs_to", "uses", "depends_on", "contains"}
 
 
 class PrologUnavailable(RuntimeError):
@@ -72,10 +72,9 @@ class PrologEngine:
 
     def high_priority_reasons(self, task_id: str) -> list[str]:
         task_atom = self._safe_atom(task_id)
-        return [
-            str(row["Reason"])
-            for row in self._query(f"high_priority_reason({task_atom}, Reason)")
-        ]
+        return sorted(
+            {str(row["Reason"]) for row in self._query(f"high_priority_reason({task_atom}, Reason)")}
+        )
 
     def _clear_dynamic_facts(self) -> None:
         for predicate in [
@@ -88,6 +87,7 @@ class PrologEngine:
             "active(_)",
             "deadline_soon(_)",
             "belongs_to(_, _)",
+            "contains(_, _)",
             "uses(_, _)",
             "depends_on(_, _)",
         ]:
@@ -111,7 +111,7 @@ class PrologEngine:
         self._assertz(f"{relationship.type}({source}, {target})")
 
     def _query_entity_ids(self, query: str, variable: str) -> list[str]:
-        return sorted(str(row[variable]) for row in self._query(query))
+        return sorted({str(row[variable]) for row in self._query(query)})
 
     def _assertz(self, fact: str) -> None:
         list(self._query(f"assertz({fact})"))
@@ -127,4 +127,3 @@ class PrologEngine:
                 f"Unsafe Prolog atom {value!r}. Use lowercase letters, numbers, and underscores."
             )
         return value
-

@@ -64,6 +64,18 @@ class EntityRepository:
             ).fetchone()
         return _entity_from_row(row) if row else None
 
+    def get_many(self, entity_ids: list[str]) -> list[Entity]:
+        if not entity_ids:
+            return []
+        placeholders = ",".join("?" for _ in entity_ids)
+        with connect(self.database_path) as connection:
+            rows = connection.execute(
+                f"SELECT * FROM entities WHERE id IN ({placeholders})",
+                entity_ids,
+            ).fetchall()
+        by_id = {_entity_from_row(row).id: _entity_from_row(row) for row in rows}
+        return [by_id[entity_id] for entity_id in entity_ids if entity_id in by_id]
+
     def list(self, entity_type: str | None = None) -> list[Entity]:
         with connect(self.database_path) as connection:
             if entity_type:
@@ -76,6 +88,39 @@ class EntityRepository:
                     "SELECT * FROM entities ORDER BY type, name",
                 ).fetchall()
         return [_entity_from_row(row) for row in rows]
+
+    def list_limited(self, limit: int, entity_type: str | None = None) -> list[Entity]:
+        with connect(self.database_path) as connection:
+            if entity_type:
+                rows = connection.execute(
+                    "SELECT * FROM entities WHERE type = ? ORDER BY type, name LIMIT ?",
+                    (entity_type, limit),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT * FROM entities ORDER BY type, name LIMIT ?",
+                    (limit,),
+                ).fetchall()
+        return [_entity_from_row(row) for row in rows]
+
+    def count(self, entity_type: str | None = None) -> int:
+        with connect(self.database_path) as connection:
+            if entity_type:
+                row = connection.execute(
+                    "SELECT COUNT(*) AS total FROM entities WHERE type = ?",
+                    (entity_type,),
+                ).fetchone()
+            else:
+                row = connection.execute("SELECT COUNT(*) AS total FROM entities").fetchone()
+        return int(row["total"])
+
+    def delete_by_source(self, source: str) -> int:
+        with connect(self.database_path) as connection:
+            cursor = connection.execute(
+                "DELETE FROM entities WHERE source = ?",
+                (source,),
+            )
+            return cursor.rowcount
 
 
 class RelationshipRepository:
@@ -138,6 +183,36 @@ class RelationshipRepository:
                 ).fetchall()
         return [_relationship_from_row(row) for row in rows]
 
+    def list_limited(self, limit: int, relationship_type: str | None = None) -> list[Relationship]:
+        with connect(self.database_path) as connection:
+            if relationship_type:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM relationships
+                    WHERE type = ?
+                    ORDER BY type, source_id
+                    LIMIT ?
+                    """,
+                    (relationship_type, limit),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT * FROM relationships ORDER BY type, source_id LIMIT ?",
+                    (limit,),
+                ).fetchall()
+        return [_relationship_from_row(row) for row in rows]
+
+    def count(self, relationship_type: str | None = None) -> int:
+        with connect(self.database_path) as connection:
+            if relationship_type:
+                row = connection.execute(
+                    "SELECT COUNT(*) AS total FROM relationships WHERE type = ?",
+                    (relationship_type,),
+                ).fetchone()
+            else:
+                row = connection.execute("SELECT COUNT(*) AS total FROM relationships").fetchone()
+        return int(row["total"])
+
     def for_source(self, source_id: str, relationship_type: str | None = None) -> list[Relationship]:
         with connect(self.database_path) as connection:
             if relationship_type:
@@ -179,4 +254,3 @@ def _relationship_from_row(row: sqlite3.Row) -> Relationship:
         created_at=row["created_at"],
         modified_at=row["modified_at"],
     )
-

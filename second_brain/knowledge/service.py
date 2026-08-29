@@ -59,11 +59,60 @@ class KnowledgeService:
     def list_entities(self, entity_type: str | None = None) -> list[Entity]:
         return self.entities.list(entity_type)
 
+    def list_entities_limited(self, limit: int, entity_type: str | None = None) -> list[Entity]:
+        return self.entities.list_limited(limit, entity_type)
+
+    def count_entities(self, entity_type: str | None = None) -> int:
+        return self.entities.count(entity_type)
+
     def get_entity(self, entity_id: str) -> Entity | None:
         return self.entities.get(entity_id)
 
+    def get_entities(self, entity_ids: list[str]) -> list[Entity]:
+        return self.entities.get_many(entity_ids)
+
     def list_relationships(self, relationship_type: str | None = None) -> list[Relationship]:
         return self.relationships.list(relationship_type)
+
+    def list_relationships_limited(
+        self,
+        limit: int,
+        relationship_type: str | None = None,
+    ) -> list[Relationship]:
+        return self.relationships.list_limited(limit, relationship_type)
+
+    def count_relationships(self, relationship_type: str | None = None) -> int:
+        return self.relationships.count(relationship_type)
+
+    def search_entities(
+        self,
+        query: str,
+        *,
+        entity_type: str | None = None,
+        limit: int = 25,
+    ) -> list[Entity]:
+        normalized = query.lower().strip()
+        if not normalized:
+            return self.list_entities(entity_type)[:limit]
+
+        matches = []
+        for entity in self.list_entities(entity_type):
+            haystack = " ".join(
+                [
+                    entity.id,
+                    entity.type,
+                    entity.name,
+                    entity.source,
+                    str(entity.metadata.get("path", "")),
+                    str(entity.metadata.get("snippet", "")),
+                ]
+            ).lower()
+            if normalized in haystack:
+                matches.append(entity)
+        return matches[:limit]
+
+    def clear_filesystem_index(self) -> int:
+        return self.entities.delete_by_source("filesystem")
 
     def seed_demo(self) -> SeedResult:
         """Create deterministic demo data for the reasoning prototype."""
@@ -124,4 +173,3 @@ class KnowledgeService:
             entities_created=len(demo_entities),
             relationships_created=len(demo_relationships),
         )
-

@@ -1,0 +1,2 @@
+"""Local MARLIN web dashboard."""
+
