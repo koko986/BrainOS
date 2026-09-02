@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="marlin-token" content="__MARLIN_TOKEN__">
+  <title>MARLIN V2</title>
+  <link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body>
+  <main id="cockpit">
+    <canvas id="brain" aria-label="MARLIN brain graph"></canvas>
+    <div class="brand">MARLIN <span>V2</span></div>
+    <section id="statusPanel" class="panel compact moveable" data-key="status">
+      <header>LOCAL SYSTEM</header>
+      <div id="statusGrid"></div>
+    </section>
+    <section id="routinePanel" class="panel compact moveable" data-key="routine">
+      <header>ROUTINE</header>
+      <div id="routineContent">No alarms or reminders.</div>
+    </section>
+    <section id="messages" class="messages moveable" data-key="messages">
+      <div class="message assistant">Good day. MARLIN V2 is local and ready.</div>
+    </section>
+    <section id="cameraPanel" class="panel camera moveable" data-key="camera">
+      <header>LOCAL CAMERA <button class="icon" id="closeCamera" title="Close camera">×</button></header>
+      <video id="cameraVideo" autoplay muted playsinline></video>
+    </section>
+    <section id="confirmPanel" class="panel confirm moveable" data-key="confirm">
+      <header>CONFIRM COMPUTER ACTION</header>
+      <strong id="confirmLabel"></strong>
+      <p id="confirmTarget"></p>
+      <pre id="confirmDiff"></pre>
+      <div class="confirm-actions">
+        <button id="cancelAction">Cancel</button>
+        <button id="approveAction" class="primary">Approve</button>
+      </div>
+    </section>
+    <section id="commandDock" class="command-dock">
+      <div class="voice-controls">
+        <button id="stopVoice">Stop voice</button>
+        <button id="listen">Listen</button>
+        <button id="openCamera">Open camera</button>
+      </div>
+      <div class="voice-monitor" aria-live="polite">
+        <span id="voiceState">Voice ready</span>
+        <div class="level-track"><div id="voiceLevel"></div></div>
+        <select id="microphone" aria-label="Microphone" title="Select microphone"></select>
+      </div>
+      <form id="commandForm">
+        <input id="commandInput" aria-label="Ask MARLIN" placeholder="Ask MARLIN" autocomplete="off">
+        <button class="run" aria-label="Run command">Run</button>
+      </form>
+    </section>
+    <div id="graphLegend">Drag nodes · wheel to zoom · double-click to fit · select a node to trace connections</div>
+  </main>
+  <script src="/assets/app.js?v=wake3"></script>
+</body>
+</html>

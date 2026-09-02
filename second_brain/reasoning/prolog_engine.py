@@ -76,6 +76,30 @@ class PrologEngine:
             {str(row["Reason"]) for row in self._query(f"high_priority_reason({task_atom}, Reason)")}
         )
 
+    def blocked_tasks(self) -> list[str]:
+        return self._query_entity_ids("blocked_task(Task)", "Task")
+
+    def overdue_tasks(self) -> list[str]:
+        return self._query_entity_ids("overdue_task(Task)", "Task")
+
+    def morning_priorities(self) -> list[str]:
+        return self._query_entity_ids("morning_priority(Task)", "Task")
+
+    def current_project_focus(self) -> list[str]:
+        return self._query_entity_ids("current_project_focus(Project)", "Project")
+
+    def dependency_chain(self, task_id: str) -> list[str]:
+        task_atom = self._safe_atom(task_id)
+        return sorted(
+            {str(row["Dependency"]) for row in self._query(f"dependency_chain({task_atom}, Dependency)")}
+        )
+
+    def morning_priority_reasons(self, task_id: str) -> list[str]:
+        task_atom = self._safe_atom(task_id)
+        return sorted(
+            {str(row["Reason"]) for row in self._query(f"morning_priority_reason({task_atom}, Reason)")}
+        )
+
     def _clear_dynamic_facts(self) -> None:
         for predicate in [
             "project(_)",
@@ -86,6 +110,9 @@ class PrologEngine:
             "technology(_)",
             "active(_)",
             "deadline_soon(_)",
+            "overdue(_)",
+            "blocked(_)",
+            "focused(_)",
             "belongs_to(_, _)",
             "contains(_, _)",
             "uses(_, _)",
@@ -102,6 +129,12 @@ class PrologEngine:
             self._assertz(f"active({atom})")
         if entity.type == "task" and entity.metadata.get("deadline_soon"):
             self._assertz(f"deadline_soon({atom})")
+        if entity.type == "task" and entity.metadata.get("overdue"):
+            self._assertz(f"overdue({atom})")
+        if entity.type == "task" and entity.metadata.get("blocked"):
+            self._assertz(f"blocked({atom})")
+        if entity.type == "project" and entity.metadata.get("current_focus"):
+            self._assertz(f"focused({atom})")
 
     def _assert_relationship(self, relationship: Relationship) -> None:
         if relationship.type not in SUPPORTED_RELATIONSHIPS:

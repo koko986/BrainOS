@@ -6,4 +6,6 @@
 :- dynamic technology/1.
 :- dynamic active/1.
 :- dynamic deadline_soon/1.
-
+:- dynamic overdue/1.
+:- dynamic blocked/1.
+:- dynamic focused/1.

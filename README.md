@@ -1,141 +1,89 @@
-# MARLIN / BrainOS
+# MARLIN V2 / BrainOS
 
-A local-first, multilingual, JARVIS-style assistant. MARLIN listens for a wake
-word, answers out loud, and has full read and write access to the machine it
-runs on.
+MARLIN V2 is a fully local, JARVIS-style Windows assistant. Conversation runs
+through Ollama and `qwen3:4b-instruct`; voice input uses Faster-Whisper; voice
+output uses Piper; knowledge is stored in SQLite; symbolic reasoning uses
+SWI-Prolog. No paid service, account, or API key is required.
 
-## What MARLIN can do
+## First setup
 
-- **Hands-free voice.** An offline wake word ("Marlin") opens the microphone,
-  then Groq `whisper-large-v3-turbo` transcribes the command.
-- **Full file control.** Read, create, overwrite, edit, move, copy, and delete
-  any file or folder, plus recursive name and content search.
-- **Open things.** Launch any app or open any file or folder in its default app.
-- **Knowledge graph.** SQLite-backed entities and relationships, with folder
-  indexing and search.
-- **Symbolic reasoning.** Prolog rules infer important and high-priority tasks
-  and explain why.
-- **Spoken replies.** Windows `System.Speech` output, no API key needed.
+Python 3.11 or newer, Ollama, and SWI-Prolog are required.
 
-MARLIN acts without asking for confirmation. See
-[Safety](#safety-and-what-marlin-will-not-do) below.
-
-## Setup
-
-Python 3.11 or newer.
-
-```bash
-pip install -r requirements.txt
-python scripts/setup_voice.py
+```powershell
+py main.py setup
+py main.py doctor
 ```
 
-`setup_voice.py` downloads the ~40 MB offline wake-word model into `models/`.
+Setup installs Python dependencies and downloads the local Qwen, Whisper, and
+Piper models. This is the only large network download MARLIN needs.
 
-Copy `.env.example` to `.env` and add a Groq API key from
-<https://console.groq.com/keys>:
+To start hands-free wake-word mode automatically after Windows login:
 
-```bash
-GROQ_API_KEY=your_key_here
+```powershell
+py main.py setup --launch-on-login
 ```
 
-For the reasoning commands, install SWI-Prolog and make sure `swipl` is on PATH.
-Everything else works without it.
+## Run
 
-Verify the whole stack:
-
-```bash
-python scripts/smoke_check.py    # model, tool calling, file access, microphone
-python scripts/check_speech.py   # transcription and wake-word detection
+```powershell
+py main.py             # desktop brain cockpit
+py main.py terminal    # terminal conversation and commands
+py main.py voice       # wake-word mode
+py main.py serve       # browser cockpit
 ```
 
-## Running
+The desktop cockpit opens the native `pywebview` window when available and
+falls back to the browser at `http://127.0.0.1:8765`.
 
-```bash
-py main.py                 # hands-free voice mode (default)
-py main.py marlin          # interactive terminal
-py main.py desktop         # desktop cockpit window
-py main.py serve           # local web dashboard
-```
+The desktop and browser cockpit listen locally for **"Hey MARLIN"**. After
+MARLIN answers, speak one command or question. The wake-word detector uses
+Vosk and does not send microphone audio to an online service.
 
-Or double-click `run_marlin.bat`.
+## Local functions
 
-In hands-free mode, say "Marlin", wait for the acknowledgement, then speak your
-request. Say "stand down" or press Ctrl+C to stop.
+- Real local conversation with streamed Ollama output and persistent context.
+- English/Burmese voice input, local wake word, and cancellable British male speech.
+- SQLite brain graph, incremental C-drive indexing, and FTS file search.
+- Prolog priority, blocked/overdue task, dependency, and project-focus reasoning.
+- Alarms, reminders, snooze, standby/wake state, morning briefings, and media controls.
+- Typed file, folder, app, camera, and media actions.
 
-In terminal mode, type requests directly. `listen` captures a single spoken
-command, `hands free` switches to wake-word mode, `voice off` mutes replies, and
-`help` lists examples.
+Read/search/open/index/create actions run directly. Append, edit, overwrite,
+move, rename, delete, and close-app operations require a one-use confirmation.
+Deletes go to the Windows Recycle Bin. Windows system paths and arbitrary shell
+execution remain blocked.
 
-## Example requests
+## Examples
 
-```
-read C:\Users\me\notes\todo.md
-add a line to my desktop file ideas.txt saying call the bank
-change every "localhost" to "127.0.0.1" in config.ini
-find every invoice PDF in my Documents folder
-search my project folder for the text TODO
-delete C:\Users\me\Downloads\old-installer.exe
-open notepad
-index this folder: C:\Users\me\Projects
+```text
+MARLIN, wake up
+morning briefing
+set an alarm in 20 minutes
+remind me to finish the Prolog report
 high priority tasks
 why high priority task_finish_graph_interface
+search my files for python
+open Documents
+play music
+stand by
 ```
 
-Burmese and mixed-language input work too; MARLIN replies in the language you
-used.
+## Compatibility commands
 
-## CLI
-
-```bash
-python -m second_brain.app.main jarvis
-python -m second_brain.app.main marlin
-python -m second_brain.app.main ask "what should I work on today?"
-python -m second_brain.app.main seed-demo
-python -m second_brain.app.main list-entities
-python -m second_brain.app.main list-relationships
-python -m second_brain.app.main reason important-tasks
-python -m second_brain.app.main reason high-priority
-python -m second_brain.app.main reason why-high-priority task_finish_graph_interface
-python -m second_brain.app.main serve
-python -m second_brain.app.main desktop
+```powershell
+py main.py seed-demo
+py main.py list-entities
+py main.py list-relationships
+py main.py reason important-tasks
+py main.py reason high-priority
+py main.py reason why-high-priority TASK_ID
 ```
-
-## How it fits together
-
-```
-microphone -> offline wake word (Vosk) -> recording with acoustic endpointing
-           -> Groq whisper-large-v3-turbo -> MarlinAgent tool loop
-           -> filesystem / knowledge graph / Prolog / app launching
-           -> spoken reply
-```
-
-The agent loop lives in `second_brain/ai/agent.py`, the tool schemas and
-dispatch in `second_brain/ai/tools.py`, unrestricted file operations in
-`second_brain/computer/filesystem.py`, and voice capture in
-`second_brain/app/voice.py`. `second_brain/app/assistant.py` routes each
-request to the fastest capable handler, so deterministic brain and computer
-commands never wait on a model call.
-
-## Safety and what MARLIN will not do
-
-MARLIN runs in full autonomous mode. There is no confirmation prompt, no path
-sandbox, and no allowlist on file operations. A misheard command can overwrite
-or permanently delete real files, including in Windows system directories.
-Deletions do not go to the Recycle Bin.
-
-- Every action is appended to `data/database/marlin_audit.jsonl`. That log is
-  the only record of what MARLIN did.
-- Shell and command-prompt execution is refused. MARLIN works through typed
-  Python tools instead.
-- Tool output is truncated to about 4000 characters per call to stay inside the
-  Groq free-tier token budget.
-- `.env` holds your API key and is git-ignored. `models/` is git-ignored too.
 
 ## Tests
 
-```bash
-pytest
+```powershell
+py -m pytest
 ```
 
-Prolog integration tests are skipped with a clear reason when SWI-Prolog or
-PySWIP is missing.
+Model, microphone, camera, and desktop integration tests skip clearly when the
+relevant local dependency or hardware is unavailable.

@@ -24,6 +24,7 @@ import ssl
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import wave
 from dataclasses import dataclass
@@ -282,6 +283,9 @@ def record_utterance(
     start_timeout: float = 8.0,
     vosk_model_path: str = "",
     on_state: Callable[[str], None] | None = None,
+    on_level: Callable[[float], None] | None = None,
+    cancel_event: threading.Event | None = None,
+    device: int | str | None = None,
 ) -> bytes:
     """Record one spoken phrase and return WAV bytes.
 
@@ -314,6 +318,7 @@ def record_utterance(
 
     try:
         stream = sd.RawInputStream(
+            device=device,
             samplerate=SAMPLE_RATE,
             blocksize=BLOCK_FRAMES,
             dtype="int16",
@@ -329,6 +334,9 @@ def record_utterance(
         hard_deadline = start_deadline + max_seconds
 
         while time.monotonic() < hard_deadline:
+            if cancel_event is not None and cancel_event.is_set():
+                notify("cancelled")
+                return b""
             try:
                 chunk = audio_queue.get(timeout=0.25)
             except queue.Empty:
@@ -341,6 +349,8 @@ def record_utterance(
                 continue
 
             level = _rms(chunk)
+            if on_level is not None:
+                on_level(min(1.0, level / 12000.0))
             model_speech, model_done = _recognizer_signals(recognizer, chunk)
 
             if not speaking:
@@ -588,7 +598,13 @@ class WakeWordListener:
             return False
         return any(phrase in normalized for phrase in self.phrases)
 
-    def wait_for_wake(self, *, timeout: float | None = None) -> bool:
+    def wait_for_wake(
+        self,
+        *,
+        timeout: float | None = None,
+        cancel_event: threading.Event | None = None,
+        device: int | str | None = None,
+    ) -> bool:
         """Block until a wake phrase is heard. Returns False on timeout."""
 
         sd = _import_sounddevice()
@@ -605,6 +621,7 @@ class WakeWordListener:
         deadline = None if timeout is None else time.monotonic() + timeout
         try:
             stream = sd.RawInputStream(
+                device=device,
                 samplerate=SAMPLE_RATE,
                 blocksize=4000,
                 dtype="int16",
@@ -616,6 +633,8 @@ class WakeWordListener:
 
         with stream:
             while True:
+                if cancel_event is not None and cancel_event.is_set():
+                    return False
                 if deadline is not None and time.monotonic() > deadline:
                     return False
                 try:

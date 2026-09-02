@@ -5,6 +5,8 @@ __pycache__/
 .venv/
 venv/
 data/database/*.db
+data/database/*.db-shm
+data/database/*.db-wal
 data/database/*.json
 data/database/*.jsonl
 !data/database/.gitkeep

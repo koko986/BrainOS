@@ -11,6 +11,7 @@ import array
 
 from second_brain.app import voice
 from second_brain.app.voice import BLOCK_FRAMES, record_utterance
+import threading
 
 SILENT_BLOCK = bytes(BLOCK_FRAMES * 2)
 
@@ -56,6 +57,17 @@ def test_silence_is_not_recorded(monkeypatch):
     captured = _record(monkeypatch, [SILENT_BLOCK] * 40)
 
     assert captured == b""
+
+
+def test_recording_can_be_cancelled(monkeypatch):
+    cancel = threading.Event()
+    cancel.set()
+    states: list[str] = []
+
+    captured = _record(monkeypatch, [SILENT_BLOCK] * 5, cancel_event=cancel, on_state=states.append)
+
+    assert captured == b""
+    assert states == ["listening", "cancelled"]
 
 
 def test_gain_ramp_without_speech_is_not_recorded(monkeypatch):

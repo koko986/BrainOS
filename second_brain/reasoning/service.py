@@ -31,6 +31,21 @@ class ReasoningService:
         ids = self._synced_engine().high_priority_tasks()
         return self._entities_for_ids(ids)
 
+    def blocked_tasks(self) -> list[Entity]:
+        return self._entities_for_ids(self._synced_engine().blocked_tasks())
+
+    def overdue_tasks(self) -> list[Entity]:
+        return self._entities_for_ids(self._synced_engine().overdue_tasks())
+
+    def morning_priorities(self) -> list[Entity]:
+        return self._entities_for_ids(self._synced_engine().morning_priorities())
+
+    def current_project_focus(self) -> list[Entity]:
+        return self._entities_for_ids(self._synced_engine().current_project_focus())
+
+    def dependency_chain(self, task_id: str) -> list[Entity]:
+        return self._entities_for_ids(self._synced_engine().dependency_chain(task_id))
+
     def why_high_priority(self, task_id: str) -> ReasoningExplanation:
         task = self.knowledge.get_entity(task_id)
         if task is None:
@@ -57,9 +72,18 @@ class ReasoningService:
         )
 
     def _synced_engine(self) -> PrologEngine:
+        # Filesystem nodes can number in the tens of thousands, but the current
+        # symbolic rules reason only over projects, tasks, technologies and
+        # their semantic relationships.
+        entities = []
+        for entity_type in ("project", "task", "technology"):
+            entities.extend(self.knowledge.list_entities(entity_type))
+        relationships = []
+        for relationship_type in ("belongs_to", "depends_on", "uses"):
+            relationships.extend(self.knowledge.list_relationships(relationship_type))
         self.engine.sync(
-            self.knowledge.list_entities(),
-            self.knowledge.list_relationships(),
+            entities,
+            relationships,
         )
         return self.engine
 
@@ -81,4 +105,3 @@ class ReasoningService:
         if reason == "dependency":
             return "The task depends on another knowledge item, so it may block related work."
         return reason.replace("_", " ")
-
