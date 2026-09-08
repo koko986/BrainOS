@@ -60,6 +60,9 @@ def main(argv: list[str] | None = None) -> int:
         return run_setup(settings)
     if command == "doctor":
         return run_doctor(settings)
+    if command == 'desktop':
+        from marlin.desktop import launch
+        return launch(settings)
 
     if command not in {"desktop", "serve", "voice", "jarvis"}:
         settings.wake_word_enabled = False
@@ -114,27 +117,9 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def run_desktop(runtime: MarlinRuntime) -> None:
-    from marlin.web import start_server_thread
-    host = runtime.settings.host
-    port = _available_port(host, runtime.settings.port)
-    start_server_thread(runtime, host, port)
-    url = f"http://{host}:{port}"
-    _wait_for_server(url)
-    print(f"MARLIN V2 cockpit: {url}")
-    try:
-        import webview  # type: ignore[import-not-found]
-    except ImportError:
-        print("pywebview is unavailable; opening the complete cockpit in your browser.")
-        webbrowser.open(url)
-        try:
-            while True:
-                time.sleep(3600)
-        except KeyboardInterrupt:
-            runtime.shutdown()
-        return
-    webview.create_window("MARLIN V2", url, width=1360, height=860, min_size=(820, 560))
-    webview.start()
+    from marlin.desktop import launch
     runtime.shutdown()
+    launch(runtime.settings)
 
 
 def run_terminal(runtime: MarlinRuntime) -> None:
@@ -151,6 +136,8 @@ def run_terminal(runtime: MarlinRuntime) -> None:
             try:
                 heard = runtime.listen()
                 print(f"You: {heard.get('text', '')}")
+                if heard.get("error"):
+                    print(f"MARLIN: {heard['error']}")
                 if heard.get("result"):
                     print(f"MARLIN: {heard['result']['message']}")
             except Exception as exc:
@@ -268,7 +255,7 @@ def _wait_for_server(url: str, timeout: float = 12.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
-            with urlopen(f"{url}/api/state", timeout=.8) as response:
+            with urlopen(f"{url}/api/health", timeout=.8) as response:
                 payload = json.loads(response.read().decode("utf-8"))
             if payload.get("version") == "2.0":
                 return

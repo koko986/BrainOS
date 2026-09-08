@@ -13,6 +13,22 @@ let draggingNode = null;
 let panning = false;
 let pointer = { x: 0, y: 0 };
 let streamingText = '';
+let voiceChatActive = false;
+let voiceChatPaused = false;
+let voiceDraft = '';
+let highlightedReminder = '';
+function showTranscript(text) {
+  if (!input.value || input.value === voiceDraft) { input.value = text; voiceDraft = text; }
+}
+
+function updateVoiceChat(active) {
+  voiceChatActive = active;
+  document.body.classList.toggle('voice-session', active);
+  const button = document.getElementById('voiceChat');
+  button.textContent = active ? 'End voice chat' : 'Voice chat';
+  button.setAttribute('aria-pressed', String(active));
+  document.getElementById('listen').disabled = active && !voiceChatPaused;
+}
 
 const colors = { file: '#8b82e8', folder: '#dce930', project: '#f0d92f', task: '#db5f9b', technology: '#40c9b5', note: '#c7d2d9', topic: '#ef8a3d' };
 const linkColors = { contains: 'rgba(55,193,183,.62)', similar_files: 'rgba(61,139,154,.42)', belongs_to: 'rgba(224,232,48,.58)', uses: 'rgba(94,137,226,.5)', depends_on: 'rgba(219,95,155,.65)' };
@@ -37,6 +53,13 @@ function resize() {
 function initializeGraph(payload) {
   const previous = nodeById;
   graph = payload;
+  const root = (graph.root || '').replaceAll('\\', '/').toLowerCase().replace(/\/$/, '');
+  for (const node of graph.nodes) {
+    const path = (node.metadata?.path || '').replaceAll('\\', '/').toLowerCase();
+    node.mainProject = node.type === 'folder' && path.slice(0, path.lastIndexOf('/')) === root;
+    let hash = 0; for (const ch of path) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0;
+    node.projectColor = `hsl(${hash % 360} 75% 72%)`;
+  }
   nodeById = new Map(graph.nodes.map(node => [node.id, node]));
   graph.links = graph.links.map(link => ({ ...link, sourceNode: nodeById.get(link.source), targetNode: nodeById.get(link.target) })).filter(link => link.sourceNode && link.targetNode);
   for (const node of graph.nodes) { node.degree = 0; node.children = []; node.parent = null; }
@@ -84,6 +107,9 @@ function initializeGraph(payload) {
     const old = previous.get(node.id);
     node.x = Number.isFinite(old?.x) ? old.x : node.anchorX + (Math.random() - .5) * 18;
     node.y = Number.isFinite(old?.y) ? old.y : node.anchorY + (Math.random() - .5) * 18;
+    if (old?.userPlaced) {
+      node.userPlaced = true; node.anchorX = old.anchorX; node.anchorY = old.anchorY;
+    }
     node.vx = 0; node.vy = 0;
   }
   if (!previous.size) fitGraph();
@@ -145,15 +171,25 @@ function draw() {
   for (const node of graph.nodes) {
     const degree = node.degree || 0;
     ctx.globalAlpha = connected && !connected.has(node.id) ? .14 : 1;
-    const radius = node === selected ? 8 : node.type === 'folder' ? Math.min(7, 3.4 + Math.sqrt(degree) * .38) : Math.min(5.2, 1.35 + Math.sqrt(degree) * .58);
-    ctx.fillStyle = colors[node.type] || '#9aa8b2';
+    const radius = node.mainProject ? 10 : node === selected ? 8 : node.type === 'folder' ? Math.min(7, 3.4 + Math.sqrt(degree) * .38) : Math.min(5.2, 1.35 + Math.sqrt(degree) * .58);
+    ctx.fillStyle = node.mainProject ? node.projectColor : colors[node.type] || '#9aa8b2';
     ctx.shadowColor = ctx.fillStyle; ctx.shadowBlur = node === selected ? 18 : node.type === 'folder' ? 8 : 2;
     ctx.beginPath(); ctx.arc(node.x, node.y, radius, 0, Math.PI * 2); ctx.fill();
     ctx.shadowBlur = 0;
-    if (node === selected || (node.type === 'folder' && degree >= 12 && transform.scale > .48) || (degree >= 12 && transform.scale > 1.15)) {
-      ctx.fillStyle = '#dce8ee'; ctx.font = `${Math.max(9, 11 / transform.scale)}px Segoe UI`;
-      ctx.fillText(node.label.slice(0, 34), node.x + radius + 4, node.y + 3);
-    }
+  }
+  const labelBoxes = [];
+  const labelled = graph.nodes.filter(n => n === selected || n.mainProject || (n.degree >= 12 && transform.scale > 1.15));
+  labelled.sort((a, b) => Number(b === selected) - Number(a === selected) || Number(b.mainProject) - Number(a.mainProject));
+  for (const node of labelled) {
+    const size = (node.mainProject ? 15 : 11) / transform.scale;
+    ctx.font = `${node.mainProject ? '600 ' : ''}${size}px Segoe UI`;
+    const text = node === selected ? node.label : node.label.slice(0, 36);
+    const box = {x: node.x + 13, y: node.y - size, w: ctx.measureText(text).width + 8, h: size + 6};
+    if (node !== selected && labelBoxes.some(b => box.x < b.x+b.w && box.x+box.w > b.x && box.y < b.y+b.h && box.y+box.h > b.y)) continue;
+    labelBoxes.push(box);
+    ctx.globalAlpha = connected && !connected.has(node.id) ? .2 : 1;
+    ctx.fillStyle = node.mainProject ? node.projectColor : '#dce8ee';
+    ctx.fillText(text, box.x, node.y);
   }
   ctx.globalAlpha = 1;
   ctx.restore();
@@ -184,16 +220,23 @@ function nearestNode(point) {
 canvas.addEventListener('pointerdown', event => {
   pointer = { x: event.clientX, y: event.clientY };
   draggingNode = nearestNode(graphPoint(event));
-  selected = draggingNode || selected;
+  selected = draggingNode || null;
   panning = !draggingNode;
   canvas.setPointerCapture(event.pointerId);
 });
 canvas.addEventListener('pointermove', event => {
+  const hover = nearestNode(graphPoint(event));
+  canvas.title = hover ? `${hover.label}\n${hover.metadata?.path || ''}` : '';
   if (draggingNode) { const p = graphPoint(event); draggingNode.x = p.x; draggingNode.y = p.y; draggingNode.vx = 0; draggingNode.vy = 0; }
   else if (panning) { transform.x += event.clientX - pointer.x; transform.y += event.clientY - pointer.y; }
   pointer = { x: event.clientX, y: event.clientY };
 });
-canvas.addEventListener('pointerup', () => { draggingNode = null; panning = false; });
+function releaseGraph() {
+  if (draggingNode) { draggingNode.anchorX = draggingNode.x; draggingNode.anchorY = draggingNode.y; draggingNode.userPlaced = true; }
+  draggingNode = null; panning = false; selected = null;
+}
+for (const event of ['pointerup', 'pointercancel', 'lostpointercapture']) canvas.addEventListener(event, releaseGraph);
+document.addEventListener('keydown', event => { if (event.key === 'Escape') releaseGraph(); });
 canvas.addEventListener('wheel', event => {
   event.preventDefault();
   const before = graphPoint(event);
@@ -223,9 +266,24 @@ function showPending(action) {
 }
 function hidePending() { pendingAction = null; document.getElementById('confirmPanel').classList.remove('active'); }
 
+let feedbackTimer;
+function feedback(message, error = false) {
+  const toast = document.getElementById('controlFeedback');
+  toast.textContent = message;
+  toast.className = error ? 'visible error' : 'visible';
+  clearTimeout(feedbackTimer);
+  feedbackTimer = setTimeout(() => toast.classList.remove('visible'), error ? 6000 : 3000);
+}
+function busy(button, value) {
+  button.disabled = value;
+  button.setAttribute('aria-busy', String(value));
+}
+
 async function submitCommand(text) {
+  feedback('Request received');
   addMessage(text, 'user'); addMessage('MARLIN is thinking…', 'thinking', 'thinking');
   try {
+    await api('/api/voice/stop', { method: 'POST' });
     const result = await api('/api/commands', { method: 'POST', body: JSON.stringify({ text, source: 'ui' }) });
     document.getElementById('thinking')?.remove();
     if (result.message) addMessage(result.message, 'assistant');
@@ -236,7 +294,7 @@ async function submitCommand(text) {
 }
 
 document.getElementById('commandForm').addEventListener('submit', event => {
-  event.preventDefault(); const text = input.value.trim(); if (!text) return; input.value = ''; submitCommand(text);
+  event.preventDefault(); const text = input.value.trim(); if (!text) return; input.value = ''; voiceDraft = ''; submitCommand(text);
 });
 document.getElementById('approveAction').addEventListener('click', async () => {
   if (!pendingAction) return; const id = pendingAction.id; hidePending();
@@ -245,32 +303,128 @@ document.getElementById('approveAction').addEventListener('click', async () => {
 document.getElementById('cancelAction').addEventListener('click', async () => {
   if (pendingAction) await api(`/api/actions/${pendingAction.id}/cancel`, { method: 'POST' }); hidePending(); addMessage('Action cancelled.');
 });
-document.getElementById('stopVoice').addEventListener('click', async () => { const result = await api('/api/voice/stop', { method: 'POST' }); addMessage(result.message); });
+document.getElementById('stopVoice').addEventListener('click', async event => {
+  const button = event.currentTarget;
+  busy(button, true); feedback('Stopping voice...');
+  document.getElementById('voiceLevel').style.width = '0%';
+  try { await api('/api/voice/stop', { method: 'POST' }); feedback('Voice stopped'); document.getElementById('voiceState').textContent = 'Voice stopped'; }
+  catch (error) { feedback(error.message, true); }
+  finally { busy(button, false); }
+});
+document.getElementById('talkNow').addEventListener('click', async event => {
+  const button = event.currentTarget;
+  busy(button, true);
+  feedback('Interrupting reply...');
+  try {
+    const result = await api('/api/voice/interrupt', {method: 'POST'});
+    updateVoiceChat(result.active);
+    document.getElementById('thinking')?.remove();
+    feedback('Reply stopped. Voice chat is resuming.');
+  } catch (error) { feedback(error.message, true); }
+  finally { busy(button, false); }
+});
+for (const [buttonId, panelId] of [['toggleStatus', 'statusPanel'], ['toggleRoutine', 'routinePanel']]) {
+  const button = document.getElementById(buttonId);
+  const panel = document.getElementById(panelId);
+  button.addEventListener('click', () => {
+    const open = panel.classList.toggle('revealed');
+    button.setAttribute('aria-expanded', String(open));
+  });
+}
 document.getElementById('listen').addEventListener('click', async event => {
   const button = event.currentTarget;
-  button.textContent = 'Listening…'; button.disabled = true;
+  button.textContent = 'Listening…'; busy(button, true); feedback('Listening. Go ahead.');
   try {
-    const result = await api('/api/voice/listen', { method: 'POST' });
-    if (result.text) await submitCommand(result.text);
-    else if (result.error) addMessage(result.error);
+    const result = await api('/api/voice/listen', { method: 'POST', body: JSON.stringify({ execute: true }) });
+    if (result.resumed) { voiceChatPaused = false; updateVoiceChat(true); feedback('Listening'); }
+    if (result.cancelled) feedback('Listening cancelled');
+    else if (result.requires_clarification) { showTranscript(result.text || ''); input.focus(); feedback(result.error, true); }
+    else if (result.result) {
+      addMessage(result.text, 'user');
+      if (result.result.message) addMessage(result.result.message);
+      if (result.result.pending) showPending(result.result.pending);
+      await handleClientAction(result.result.client_action);
+    }
+    else if (result.error) { addMessage(result.error); feedback(result.error, true); }
   }
   catch (error) { addMessage(error.message); }
-  finally { button.textContent = 'Listen'; button.disabled = false; }
+  finally { button.textContent = 'Listen'; busy(button, false); }
 });
 document.getElementById('microphone').addEventListener('change', async event => {
   localStorage.setItem('marlin-microphone', event.target.value);
   await api('/api/voice/device', { method: 'POST', body: JSON.stringify({ device: event.target.value }) });
 });
+document.getElementById('voiceChat').addEventListener('click', async event => {
+  const button = event.currentTarget;
+  busy(button, true);
+  const starting = !voiceChatActive;
+  try {
+    const result = await api(`/api/voice/chat/${starting ? 'start' : 'stop'}`, { method: 'POST' });
+    updateVoiceChat(result.active);
+    feedback(result.active ? 'Voice chat started' : 'Voice chat ended');
+  } catch (error) { feedback(error.message, true); }
+  finally { busy(button, false); }
+});
 
 async function openCamera() {
   const panel = document.getElementById('cameraPanel');
-  try { cameraStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false }); document.getElementById('cameraVideo').srcObject = cameraStream; panel.classList.add('active'); }
-  catch { addMessage('Camera permission was not granted.'); }
+  const button = document.getElementById('openCamera');
+  if (cameraStream) { feedback('Camera is already open'); return; }
+  busy(button, true); feedback('Opening camera...');
+  try { cameraStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false }); document.getElementById('cameraVideo').srcObject = cameraStream; panel.classList.add('active'); button.setAttribute('aria-pressed', 'true'); feedback('Camera opened'); }
+  catch (error) { feedback(`Camera unavailable: ${error.message}`, true); }
+  finally { busy(button, false); }
 }
-function closeCamera() { cameraStream?.getTracks().forEach(track => track.stop()); cameraStream = null; document.getElementById('cameraPanel').classList.remove('active'); }
-async function handleClientAction(action) { if (action === 'open_camera') await openCamera(); if (action === 'close_camera') closeCamera(); }
-document.getElementById('openCamera').addEventListener('click', openCamera);
+function closeCamera() { cameraStream?.getTracks().forEach(track => track.stop()); cameraStream = null; document.getElementById('cameraPanel').classList.remove('active'); document.getElementById('openCamera').setAttribute('aria-pressed', 'false'); feedback('Camera closed'); }
+async function handleClientAction(action) {
+  if (action === 'open_camera') await openCamera();
+  if (action === 'close_camera') closeCamera();
+  if (action === 'open_camera_native') feedback('Windows Camera opened');
+  if (action === 'close_camera_native') { closeCamera(); feedback('Windows Camera closed'); }
+}
+document.getElementById('openCamera').addEventListener('click', () => submitCommand('open camera'));
 document.getElementById('closeCamera').addEventListener('click', closeCamera);
+
+function renderRoutine(state) {
+  const container = document.getElementById('routineContent');
+  const signature = JSON.stringify([state.reminders, state.alarms, state.reminder_storage, highlightedReminder, new Date().toDateString()]);
+  if (container.dataset.signature === signature) return;
+  container.dataset.signature = signature;
+  container.replaceChildren();
+  const groups = new Map(['Today', 'Upcoming', 'Overdue', 'Unscheduled', 'Completed'].map(name => [name, []]));
+  const now = new Date();
+  for (const item of state.reminders) {
+    const due = item.due_at ? new Date(item.due_at) : null;
+    const group = item.completed ? 'Completed' : !due ? 'Unscheduled' : due < now ? 'Overdue' : due.toDateString() === now.toDateString() ? 'Today' : 'Upcoming';
+    groups.get(group).push(item);
+  }
+  const stamp = value => new Date(value).toLocaleString('en-GB', {dateStyle: 'medium', timeStyle: 'short'}) + ` (${Intl.DateTimeFormat().resolvedOptions().timeZone})`;
+  for (const [group, items] of groups) {
+    if (!items.length) continue;
+    const heading = document.createElement('h3'); heading.textContent = group; container.append(heading);
+    for (const item of items.sort((a,b) => (a.due_at || '').localeCompare(b.due_at || ''))) {
+      const row = document.createElement('article'); row.className = 'reminder-row'; row.classList.toggle('new-reminder', item.id === highlightedReminder);
+      const title = document.createElement('strong'); title.textContent = item.text;
+      const time = document.createElement('p'); time.textContent = item.due_at ? stamp(item.due_at) : 'No scheduled time';
+      const status = document.createElement('small'); status.textContent = item.completed ? 'Completed' : item.notified_at ? 'Notified' : 'Pending';
+      const details = document.createElement('details'); const summary = document.createElement('summary'); summary.textContent = 'Saved locally in MARLIN';
+      const location = document.createElement('p'); location.textContent = `${state.reminder_storage}\nReminder ID: ${item.id}`;
+      details.append(summary, location); row.append(title, time, status, details);
+      if (!item.completed) {
+        const controls = document.createElement('div'); controls.className = 'reminder-controls';
+        for (const [action, symbol, label] of [['complete', '✓', 'Complete reminder'], ['snooze', '↻', 'Snooze 5 minutes']]) {
+          const button = document.createElement('button'); button.textContent = symbol; button.title = label; button.setAttribute('aria-label', label);
+          button.onclick = async () => { busy(button, true); try { await api(`/api/reminders/${encodeURIComponent(item.id)}/${action}`, {method: 'POST', body: action === 'snooze' ? JSON.stringify({minutes: 5}) : undefined}); await refreshState(); } catch (error) { feedback(error.message, true); busy(button, false); } };
+          controls.append(button);
+        }
+        row.append(controls);
+      }
+      container.append(row);
+    }
+  }
+  for (const alarm of state.alarms) { const row = document.createElement('p'); row.textContent = `Alarm: ${alarm.label} · ${stamp(alarm.due_at)}`; container.append(row); }
+  if (!state.reminders.length && !state.alarms.length) container.textContent = 'No alarms or reminders.';
+}
 
 async function refreshState() {
   const state = await api('/api/state');
@@ -280,11 +434,13 @@ async function refreshState() {
     ['prolog', state.prolog.available ? 'ready' : 'offline'], ['voice', `${state.voice.stt} / ${state.voice.tts}`],
     ['index', state.index_progress?.indexed ? `${state.index_progress.indexed} files` : state.index], ['brain', `${state.entities} nodes · ${state.relationships} links`]
   ].map(([key, value]) => `<div class="status-row"><strong>${key}</strong><span class="state-${state.state}">${value}</span></div>`).join('');
-  const items = [...state.alarms.slice(0, 3).map(item => `Alarm: ${item.label}`), ...state.reminders.slice(0, 3).map(item => `Reminder: ${item.text}`)];
-  document.getElementById('routineContent').textContent = items.join(' · ') || 'No alarms or reminders.';
+  renderRoutine(state);
   const voiceState = document.getElementById('voiceState');
-  if (state.voice.wake_word && voiceState.textContent === 'Voice ready') voiceState.textContent = 'Say “Hey MARLIN”';
+  if (state.voice.wake_word && !state.voice_chat) voiceState.textContent = state.voice.wake_status === 'ready' ? 'Say “Hey MARLIN”' : `Wake: ${state.voice.wake_status}`;
   const select = document.getElementById('microphone');
+  voiceChatPaused = Boolean(state.voice_chat_paused);
+  updateVoiceChat(Boolean(state.voice_chat));
+  select.title = select.value ? 'Selected microphone' : `System default: ${state.voice.default_microphone_name || 'Windows input device'}`;
   if (!select.dataset.ready) {
     const saved = localStorage.getItem('marlin-microphone') ?? '';
     select.innerHTML = `<option value="">System default</option>` + (state.voice.microphones || []).map(item => `<option value="${item.id}">${item.name}</option>`).join('');
@@ -308,14 +464,45 @@ function connectEvents() {
       stream.textContent = streamingText;
       document.getElementById('thinking')?.remove();
     }
+    if (packet.type === 'assistant.timing') document.getElementById('voiceState').textContent = `Replying in ${(packet.data.first_token_ms / 1000).toFixed(1)}s`;
     if (packet.type === 'assistant.done') { document.getElementById('thinking')?.remove(); document.getElementById('streaming')?.remove(); streamingText = ''; }
     if (packet.type === 'action.preview') showPending(packet.data.action);
     if (packet.type === 'tool.call') addMessage(`Tool: ${packet.data.name}`, 'thinking');
     if (packet.type === 'prolog.result') addMessage(`Prolog: ${packet.data.query}`, 'thinking');
     if (packet.type === 'graph.refresh') refreshGraph();
     if (packet.type === 'voice.state') document.getElementById('voiceState').textContent = `Voice ${packet.data.state}`;
+    if (packet.type === 'voice.error') feedback(packet.data.error, true);
+    if (packet.type === 'voice.timing') document.getElementById('voiceState').textContent = `Transcribed in ${(packet.data.transcription_ms / 1000).toFixed(1)}s`;
+    if (packet.type === 'voice.clarification') {
+      showTranscript(packet.data.text || '');
+      feedback(packet.data.error || 'Check the transcript before running it.', true);
+    }
+    if (packet.type === 'voice.chat.retrying') { showTranscript(packet.data.text || ''); document.getElementById('voiceState').textContent = 'Listening again'; }
+    if (packet.type === 'voice.chat.interrupted' || packet.type === 'voice.barge_in') {
+      document.getElementById('thinking')?.remove();
+      document.getElementById('streaming')?.remove();
+      streamingText = '';
+      document.getElementById('voiceState').textContent = 'Listening to you';
+      feedback('Interrupted. Go ahead.');
+    }
+    if (packet.type === 'voice.chat.paused') { voiceChatPaused = true; showTranscript(packet.data.text || ''); updateVoiceChat(true); input.focus(); }
+    if (packet.type === 'voice.chat.resumed') { voiceChatPaused = false; updateVoiceChat(true); }
+    if (packet.type === 'voice.chat') {
+      updateVoiceChat(packet.data.active);
+      document.getElementById('wake-listening')?.remove();
+      if (!packet.data.active) feedback('Voice chat ended');
+    }
+    if (packet.type === 'voice.chat.heard') { showTranscript(packet.data.text); addMessage(packet.data.text, 'user'); }
+    if (packet.type === 'voice.chat.result') {
+      if (packet.data.message) addMessage(packet.data.message, 'assistant');
+      if (packet.data.pending) showPending(packet.data.pending);
+      else hidePending();
+      handleClientAction(packet.data.client_action);
+    }
+    if (packet.type === 'voice.chat.cancelled' && pendingAction?.id === packet.data.action_id) hidePending();
     if (packet.type === 'voice.level') document.getElementById('voiceLevel').style.width = `${Math.round((packet.data.level || 0) * 100)}%`;
     if (packet.type === 'wake.ready') document.getElementById('voiceState').textContent = 'Say “Hey MARLIN”';
+    if (packet.type === 'wake.acknowledged') { feedback('Heard you. Listening...'); document.getElementById('voiceState').textContent = 'Listening'; }
     if (packet.type === 'wake.detected') addMessage('Yes, sir? Listening…', 'thinking', 'wake-listening');
     if (packet.type === 'wake.heard') { document.getElementById('wake-listening')?.remove(); addMessage(packet.data.text, 'user'); }
     if (packet.type === 'wake.error') { document.getElementById('wake-listening')?.remove(); addMessage(packet.data.error, 'assistant'); }
@@ -325,7 +512,14 @@ function connectEvents() {
       if (packet.data.pending) showPending(packet.data.pending);
       handleClientAction(packet.data.client_action);
     }
-    if (['assistant.state','voice.state','wake.detected','wake.result','index.progress','alarm.created','alarm.fired','reminder.created'].includes(packet.type)) refreshState();
+    if (packet.type === 'assistant.interrupted') { document.getElementById('thinking')?.remove(); document.getElementById('streaming')?.remove(); streamingText = ''; }
+    if (packet.type === 'reminder.created' || packet.type === 'reminder.fired') {
+      highlightedReminder = packet.data.reminder?.id;
+      document.getElementById('routinePanel').classList.add('revealed');
+      document.getElementById('toggleRoutine').setAttribute('aria-expanded', 'true');
+    }
+    if (packet.type === 'reminder.fired') { highlightedReminder = packet.data.reminder.id; addMessage(`Reminder: ${packet.data.reminder.text}`); feedback(`Reminder: ${packet.data.reminder.text}`); }
+    if (['assistant.state','voice.state','wake.detected','wake.result','index.progress','alarm.created','alarm.fired','reminder.created','reminder.updated','reminder.fired'].includes(packet.type)) refreshState();
     if (packet.type === 'alarm.fired') addMessage(`${packet.data.alarm.label}. Would you like five more minutes?`);
   };
   socket.onclose = () => setTimeout(connectEvents, 1200);
@@ -346,6 +540,6 @@ function makeMoveable(element) {
   });
 }
 
-window.addEventListener('resize', resize); resize();
+window.addEventListener('resize', () => { resize(); fitGraph(); }); resize();
 document.querySelectorAll('.moveable').forEach(makeMoveable);
 Promise.all([refreshState(), refreshGraph()]).then(() => { draw(); connectEvents(); input.focus(); });

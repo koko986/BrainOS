@@ -161,6 +161,8 @@ class RoutineService:
 
     def _alarm_loop(self) -> None:
         while not self._stop.wait(1.0):
+            for reminder in self.store.claim_due_reminders():
+                self.events.publish('reminder.fired', reminder=reminder)
             for alarm in self.store.due_alarms():
                 self.last_fired_alarm_id = str(alarm["id"])
                 self.store.mark_alarm_fired(self.last_fired_alarm_id)

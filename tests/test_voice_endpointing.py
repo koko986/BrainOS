@@ -145,3 +145,24 @@ def test_acoustic_model_can_trigger_recording_below_the_loudness_bar(monkeypatch
     captured = _record(monkeypatch, blocks, vosk_model_path="pretend", start_timeout=2.0)
 
     assert captured.startswith(b"RIFF")
+
+
+def test_quiet_command_during_warmup_keeps_first_and_last_words(monkeypatch):
+    import io
+    import wave
+
+    class EarlyRecognizer:
+        def __init__(self):
+            self.calls = 0
+        def AcceptWaveform(self, chunk):
+            self.calls += 1
+            return False
+        def PartialResult(self):
+            return '{"partial":"hello"}' if self.calls >= 3 else '{"partial":""}'
+
+    monkeypatch.setattr(voice, '_optional_recognizer', lambda path: EarlyRecognizer())
+    speech = [_tone_block(150)] * 16
+    captured = _record(monkeypatch, speech + [SILENT_BLOCK] * 10, vosk_model_path='model', silence_seconds=.5)
+    with wave.open(io.BytesIO(captured), 'rb') as wav:
+        pcm = wav.readframes(wav.getnframes())
+    assert pcm.startswith(b''.join(speech))

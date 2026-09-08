@@ -41,8 +41,10 @@ class MarlinSettings:
     ollama_model: str = "qwen3:4b-instruct"
     ollama_timeout_seconds: float = 45.0
     ollama_keep_alive: str = "30m"
-    ollama_context: int = 2048
-    ollama_max_tokens: int = 160
+    ollama_context: int = 1536
+    ollama_max_tokens: int = 96
+    ollama_think: bool = False
+    voice_silence_seconds: float = 0.4
     whisper_model: str = "small"
     whisper_device: str = "cpu"
     whisper_compute_type: str = "int8"
@@ -52,6 +54,7 @@ class MarlinSettings:
     piper_data_dir: Path = PROJECT_ROOT / "models" / "piper"
     vosk_model_path: Path = PROJECT_ROOT / "models" / "vosk-model-small-en-us-0.15"
     auto_index_c_drive: bool = True
+    graph_root: Path = Path(r"C:\Projects\Projects")
     index_batch_size: int = 5000
     weather_enabled: bool = True
     weather_latitude: float = 16.8409
@@ -74,6 +77,8 @@ class MarlinSettings:
             ollama_keep_alive=os.getenv("MARLIN_OLLAMA_KEEP_ALIVE", defaults.ollama_keep_alive),
             ollama_context=int(os.getenv("MARLIN_OLLAMA_CONTEXT", str(defaults.ollama_context))),
             ollama_max_tokens=int(os.getenv("MARLIN_OLLAMA_MAX_TOKENS", str(defaults.ollama_max_tokens))),
+            ollama_think=_bool("MARLIN_OLLAMA_THINK", defaults.ollama_think),
+            voice_silence_seconds=float(os.getenv("MARLIN_VOICE_SILENCE_SECONDS", str(defaults.voice_silence_seconds))),
             whisper_model=os.getenv("MARLIN_WHISPER_MODEL", defaults.whisper_model),
             whisper_device=os.getenv("MARLIN_WHISPER_DEVICE", defaults.whisper_device),
             whisper_compute_type=os.getenv("MARLIN_WHISPER_COMPUTE", defaults.whisper_compute_type),
@@ -83,6 +88,7 @@ class MarlinSettings:
             piper_data_dir=Path(os.getenv("MARLIN_PIPER_DATA_DIR", str(defaults.piper_data_dir))).expanduser(),
             vosk_model_path=Path(os.getenv("MARLIN_VOSK_MODEL_PATH", str(defaults.vosk_model_path))).expanduser(),
             auto_index_c_drive=_bool("MARLIN_AUTO_INDEX_C", defaults.auto_index_c_drive),
+            graph_root=Path(os.getenv("MARLIN_GRAPH_ROOT", str(defaults.graph_root))).expanduser(),
             index_batch_size=int(os.getenv("MARLIN_INDEX_BATCH_SIZE", str(defaults.index_batch_size))),
             weather_enabled=_bool("MARLIN_WEATHER_ENABLED", defaults.weather_enabled),
             weather_latitude=float(os.getenv("MARLIN_WEATHER_LATITUDE", str(defaults.weather_latitude))),

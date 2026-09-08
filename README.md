@@ -42,11 +42,12 @@ Vosk and does not send microphone audio to an online service.
 ## Local functions
 
 - Real local conversation with streamed Ollama output and persistent context.
-- English/Burmese voice input, local wake word, and cancellable British male speech.
+- English voice input, local wake word, and cancellable, sentence-streamed British male speech.
 - SQLite brain graph, incremental C-drive indexing, and FTS file search.
 - Prolog priority, blocked/overdue task, dependency, and project-focus reasoning.
 - Alarms, reminders, snooze, standby/wake state, morning briefings, and media controls.
 - Typed file, folder, app, camera, and media actions.
+- Native Windows Camera launch, local video playback through the default player, and local graph explanations.
 
 Read/search/open/index/create actions run directly. Append, edit, overwrite,
 move, rename, delete, and close-app operations require a one-use confirmation.
@@ -64,7 +65,13 @@ high priority tasks
 why high priority task_finish_graph_interface
 search my files for python
 open Documents
+open camera
+play C:\Videos\demo.mp4
+play the video file
+explain my graph
 play music
+hide MARLIN
+turn yourself off
 stand by
 ```
 
@@ -87,3 +94,17 @@ py -m pytest
 
 Model, microphone, camera, and desktop integration tests skip clearly when the
 relevant local dependency or hardware is unavailable.
+# Graph Folder Scope
+
+The cockpit graph shows only `C:\Projects\Projects` and its nested folders and files.
+Set `MARLIN_GRAPH_ROOT` to change this directory. Automatic startup indexing uses
+the same root; unrelated stored knowledge is preserved but hidden from the graph.
+All indexed folders are retained in the view, while file previews are capped.
+System, hidden, dependency folders and filesystem links are skipped during indexing.
+
+## Model speed
+
+MARLIN defaults to `qwen3:4b-instruct` with `MARLIN_OLLAMA_THINK=false`. This is
+the fastest practical option for a 4 GB GPU. The installed `qwen3:8b` model can
+be selected with `MARLIN_OLLAMA_MODEL=qwen3:8b`, but it uses more system memory
+and replies more slowly when it cannot fit fully in GPU memory.

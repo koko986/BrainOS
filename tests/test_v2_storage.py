@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from marlin.storage import MarlinStore
+from marlin.storage import MarlinStore, SCHEMA_VERSION
 from second_brain.database.connection import initialize_database
 from second_brain.knowledge.service import KnowledgeService
 
@@ -19,7 +19,7 @@ def test_v2_migration_backs_up_and_preserves_brain_data(tmp_path):
 
     assert backup is not None and backup.exists()
     assert knowledge.get_entity("file_notes") is not None
-    assert store.schema_version() == 2
+    assert store.schema_version() == SCHEMA_VERSION
     assert store.search_files("architecture")[0]["entity_id"] == "file_notes"
 
 
@@ -29,4 +29,3 @@ def test_v2_migration_is_idempotent(tmp_path):
     store = MarlinStore(database)
     assert store.migrate() is not None
     assert store.migrate() is None
-

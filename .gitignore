@@ -11,3 +11,8 @@ data/database/*.json
 data/database/*.jsonl
 !data/database/.gitkeep
 models/
+data/database/browser-media/
+data/database/desktop-profile/
+data/database/*.desktop.log
+presentation/_qa*/
+presentation/_qa_*/

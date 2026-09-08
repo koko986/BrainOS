@@ -19,7 +19,7 @@ TEXT_EXTENSIONS = {
 }
 SKIP_NAMES = {
     ".agents", ".cache", ".codex", ".git", ".idea", ".pytest_cache", ".venv", "$recycle.bin",
-    "__pycache__", "appdata", "node_modules", "program files", "program files (x86)", "programdata",
+    "__pycache__", "appdata", "browser-media", "desktop-profile", "node_modules", "program files", "program files (x86)", "programdata",
     "recovery", "system volume information", "windows", "venv",
 }
 COMPLETE_CURSOR = "::complete::"
@@ -180,6 +180,8 @@ class IncrementalIndexer:
 
     @staticmethod
     def _skip(path: Path) -> bool:
+        if path.is_symlink() or (hasattr(path, "is_junction") and path.is_junction()):
+            return True
         parts = {part.lower() for part in path.parts}
         if parts.intersection(SKIP_NAMES):
             return True

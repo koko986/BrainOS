@@ -56,6 +56,10 @@ SITE_SHORTCUTS = {
     "chatgpt": "https://chatgpt.com/",
 }
 
+VIDEO_EXTENSIONS = {
+    ".3gp", ".avi", ".m4v", ".mkv", ".mov", ".mp4", ".mpeg", ".mpg", ".webm", ".wmv",
+}
+
 
 @dataclass(slots=True)
 class PendingAction:
@@ -105,6 +109,8 @@ class ComputerActionService:
         self.store = store
         self.on_context = on_context
         self._pending: dict[str, PendingAction] = {}
+        from marlin.browser_media import YouTubePlayer
+        self.youtube = YouTubePlayer(store.database_path.parent / 'browser-media')
 
     def invoke(self, name: str, arguments: dict[str, Any], *, approved: bool = False) -> ActionOutcome:
         try:
@@ -114,7 +120,7 @@ class ComputerActionService:
         except (FileToolError, ValueError, OSError) as exc:
             self.store.record_action(name, name.replace("_", " "), self._target(arguments), "failed", {"error": str(exc)})
             return ActionOutcome(False, f"That action failed: {exc}")
-        self.store.record_action(name, name.replace("_", " "), self._target(arguments), "complete")
+        self.store.record_action(name, name.replace("_", " "), self._target(arguments), "complete" if outcome.ok else "failed")
         return outcome
 
     def approve(self, action_id: str) -> ActionOutcome:
@@ -126,6 +132,9 @@ class ComputerActionService:
         if pending.fingerprint and pending.fingerprint != self._fingerprint(Path(pending.target)):
             return ActionOutcome(False, "The target changed after the preview, so I did not modify it.")
         return self.invoke(pending.name, pending.arguments, approved=True)
+
+    def is_pending(self, action_id: str) -> bool:
+        return action_id in self._pending
 
     def cancel(self, action_id: str) -> ActionOutcome:
         pending = self._pending.pop(action_id, None)
@@ -262,6 +271,16 @@ class ComputerActionService:
             os.startfile(str(path))  # type: ignore[attr-defined]
             self._remember("folder" if path.is_dir() else "file", str(path))
             return ActionOutcome(True, f"Opened {path}.")
+        if name == "play_video":
+            path = resolve_path(args.get("path"))
+            if not path.exists() or not path.is_file():
+                raise ValueError(f"Video file does not exist: {path}")
+            if path.suffix.lower() not in VIDEO_EXTENSIONS:
+                raise ValueError(f"That is not a supported video file: {path.name}")
+            os.startfile(str(path))  # type: ignore[attr-defined]
+            self._remember("video", str(path))
+            self._remember("file", str(path))
+            return ActionOutcome(True, f"Playing {path.name} in your default video player.", {"path": str(path)})
         if name == "open_app":
             app = str(args.get("app", "")).strip()
             command = self._app_command(app)
@@ -271,6 +290,14 @@ class ComputerActionService:
                 subprocess.Popen([command], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             self._remember("app", app)
             return ActionOutcome(True, f"Opened {app}.")
+        if name == 'close_browser_tab':
+            result = self.youtube.close_tab()
+            return ActionOutcome(result['ok'], result['message'], result)
+        if name == 'play_youtube':
+            result = self.youtube.play(str(args.get('query') or 'relaxing music'))
+            if result.get('url'):
+                self._remember('website', result['url'])
+            return ActionOutcome(result['ok'], result['message'], result)
         if name == "open_url":
             url = self.resolve_website(str(args.get("url") or args.get("site") or ""))
             parsed = urlparse(url)
@@ -281,23 +308,62 @@ class ComputerActionService:
             self._remember("website", url)
             return ActionOutcome(True, f"Opened {parsed.netloc} in Chrome.", {"url": url})
         if name == "close_app":
-            app = str(args.get("app", "")).strip().lower().removesuffix(".exe")
+            app = str(args.get("app", "")).strip()
+            process_names = self._process_names(app)
             import psutil
             closed = 0
             for process in psutil.process_iter(["name"]):
-                if str(process.info.get("name") or "").lower().removesuffix(".exe") == app:
-                    process.terminate()
-                    closed += 1
-            return ActionOutcome(bool(closed), f"Closed {closed} {app} process(es).")
+                try:
+                    running = str(process.info.get("name") or "").lower().removesuffix(".exe").replace(" ", "")
+                    if running in process_names:
+                        process.terminate()
+                        closed += 1
+                except (psutil.AccessDenied, psutil.NoSuchProcess):
+                    continue
+            return ActionOutcome(bool(closed), f"Closed {app}." if closed else f"{app} is not running.", {"closed": closed})
         if name == "media_control":
             command = str(args.get("command", "play_pause"))
             self._media_key(command)
             return ActionOutcome(True, f"Media command sent: {command.replace('_', ' ')}.")
         if name == "open_camera":
-            return ActionOutcome(True, "Opening the local camera preview.", client_action="open_camera")
+            self._open_windows_camera()
+            self._remember("app", "camera")
+            return ActionOutcome(True, "Opened the Windows Camera app.", client_action="open_camera_native")
         if name == "close_camera":
-            return ActionOutcome(True, "Camera preview closed.", client_action="close_camera")
+            closed = self._close_windows_camera()
+            return ActionOutcome(closed > 0, "Closed the Windows Camera app." if closed else "The Windows Camera app is not running.", {"closed": closed}, client_action="close_camera_native")
         raise ValueError(f"Unsupported local action: {name}")
+
+    def find_video(self, query: str = "") -> Path | None:
+        """Resolve a recent or indexed video without scanning the disk during a command."""
+        normalized = str(query or "").strip().strip('"')
+        if normalized:
+            candidate = Path(os.path.expandvars(normalized)).expanduser()
+            if candidate.exists() and candidate.is_file() and candidate.suffix.lower() in VIDEO_EXTENSIONS:
+                return candidate.resolve()
+
+        for kind in ("video", "file"):
+            for item in self.store.recent_context(kind, 25):
+                candidate = Path(str(item.get("value") or ""))
+                if candidate.exists() and candidate.is_file() and candidate.suffix.lower() in VIDEO_EXTENSIONS:
+                    if not normalized or normalized.lower() in candidate.name.lower():
+                        return candidate.resolve()
+
+        clauses = " OR ".join("lower(path) LIKE ?" for _ in VIDEO_EXTENSIONS)
+        arguments: list[Any] = [f"%{suffix}" for suffix in sorted(VIDEO_EXTENSIONS)]
+        sql = f"SELECT path FROM file_search WHERE ({clauses})"
+        if normalized:
+            sql += " AND (lower(name) LIKE ? OR lower(path) LIKE ?)"
+            needle = f"%{normalized.lower()}%"
+            arguments.extend((needle, needle))
+        sql += " ORDER BY modified_at DESC LIMIT 50"
+        with self.store.connect() as connection:
+            rows = connection.execute(sql, arguments).fetchall()
+        for row in rows:
+            candidate = Path(str(row["path"]))
+            if candidate.exists() and candidate.is_file():
+                return candidate.resolve()
+        return None
 
     def _diff_preview(self, name: str, args: dict[str, Any], path: Path | None) -> str:
         if path is None or name not in {"edit_file", "overwrite_file", "append_file"}:
@@ -343,6 +409,30 @@ class ComputerActionService:
         self.store.add_context(kind, value)
         if self.on_context:
             self.on_context(kind, value)
+
+    @classmethod
+    def _process_names(cls, app: str) -> set[str]:
+        normalized = " ".join(app.lower().split()).removesuffix(".exe")
+        aliases = {
+            "vs code": {"code"},
+            "vscode": {"code"},
+            "visual studio code": {"code"},
+            "google chrome": {"chrome"},
+            "chrome": {"chrome"},
+            "microsoft edge": {"msedge"},
+            "edge": {"msedge"},
+            "calculator": {"calculatorapp", "calc"},
+            "calc": {"calculatorapp", "calc"},
+            "camera": {"windowscamera", "microsoft.windowscamera"},
+        }
+        names = set(aliases.get(normalized, {normalized.replace(" ", "")}))
+        try:
+            resolved = Path(cls._app_command(app))
+            if resolved.suffix.lower() != ".lnk":
+                names.add(resolved.stem.lower().replace(" ", ""))
+        except ValueError:
+            pass
+        return names
 
     @classmethod
     def _app_command(cls, name: str) -> str:
@@ -447,3 +537,30 @@ class ComputerActionService:
             raise ValueError(f"Unknown media command: {command}")
         ctypes.windll.user32.keybd_event(key, 0, 0, 0)
         ctypes.windll.user32.keybd_event(key, 0, 2, 0)
+
+    @staticmethod
+    def _open_windows_camera() -> None:
+        if sys.platform != "win32":
+            raise ValueError("The native camera action is only available on Windows.")
+        subprocess.Popen(
+            ["explorer.exe", r"shell:AppsFolder\Microsoft.WindowsCamera_8wekyb3d8bbwe!App"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    @staticmethod
+    def _close_windows_camera() -> int:
+        if sys.platform != "win32":
+            raise ValueError("The native camera action is only available on Windows.")
+        import psutil
+
+        closed = 0
+        for process in psutil.process_iter(["name"]):
+            try:
+                name = str(process.info.get("name") or "").lower()
+                if name in {"windowscamera.exe", "microsoft.windowscamera.exe"}:
+                    process.terminate()
+                    closed += 1
+            except (psutil.AccessDenied, psutil.NoSuchProcess):
+                continue
+        return closed

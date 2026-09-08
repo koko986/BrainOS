@@ -48,6 +48,7 @@ class OllamaLocalModel:
             "prompt": "",
             "stream": False,
             "keep_alive": self.settings.ollama_keep_alive,
+            "options": {"num_ctx": self.settings.ollama_context},
         }
         request = Request(
             f"{self.settings.ollama_url.rstrip('/')}/api/generate",
@@ -89,6 +90,7 @@ class OllamaLocalModel:
             "model": self.model,
             "messages": messages,
             "stream": True,
+            "think": self.settings.ollama_think,
             "keep_alive": self.settings.ollama_keep_alive,
             "options": {
                 "temperature": 0.2,

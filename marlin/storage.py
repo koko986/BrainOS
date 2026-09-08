@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 V2_SCHEMA = """
 CREATE TABLE IF NOT EXISTS marlin_meta (
@@ -123,6 +123,9 @@ class MarlinStore:
             self.backup_path = self._backup_database()
         with self.connect() as connection:
             connection.executescript(V2_SCHEMA)
+            columns = {row['name'] for row in connection.execute('PRAGMA table_info(reminders)')}
+            if 'notified_at' not in columns:
+                connection.execute('ALTER TABLE reminders ADD COLUMN notified_at TEXT')
             connection.execute(
                 "INSERT OR REPLACE INTO marlin_meta(key, value) VALUES('schema_version', ?)",
                 (str(SCHEMA_VERSION),),
@@ -370,6 +373,27 @@ class MarlinStore:
                 rows = connection.execute("SELECT * FROM reminders WHERE completed = 0 ORDER BY due_at IS NULL, due_at, created_at").fetchall()
             else:
                 rows = connection.execute("SELECT * FROM reminders ORDER BY created_at DESC").fetchall()
+        return [dict(row) for row in rows]
+
+    def update_reminder(self, reminder_id: str, *, minutes: int | None = None) -> dict[str, Any] | None:
+        if minutes is not None and not 1 <= minutes <= 1440:
+            raise ValueError('Snooze must be between 1 and 1440 minutes.')
+        with self.connect() as connection:
+            if minutes is None:
+                cursor = connection.execute('UPDATE reminders SET completed=1 WHERE id=?', (reminder_id,))
+            else:
+                due = (datetime.now(UTC) + timedelta(minutes=minutes)).isoformat(timespec='seconds')
+                cursor = connection.execute('UPDATE reminders SET completed=0, due_at=?, notified_at=NULL WHERE id=?', (due, reminder_id))
+            if not cursor.rowcount:
+                return None
+            return dict(connection.execute('SELECT * FROM reminders WHERE id=?', (reminder_id,)).fetchone())
+
+    def claim_due_reminders(self) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                'UPDATE reminders SET notified_at=? WHERE completed=0 AND notified_at IS NULL AND due_at <= ? RETURNING *',
+                (now_iso(), now_iso()),
+            ).fetchall()
         return [dict(row) for row in rows]
 
     def record_action(self, kind: str, label: str, target: str, status: str, details: dict[str, Any] | None = None) -> dict[str, Any]:

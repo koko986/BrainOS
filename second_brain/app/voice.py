@@ -313,6 +313,7 @@ def record_utterance(
     speaking = False
     loud_streak = 0
     quiet_for = 0.0
+    release_level = MIN_SPEECH_RMS * 0.6
     warmed = 0
     block_seconds = BLOCK_FRAMES / SAMPLE_RATE
 
@@ -342,20 +343,25 @@ def record_utterance(
             except queue.Empty:
                 continue
 
-            # The first blocks after opening a stream are often near-silent and
-            # would drag the noise floor estimate far too low.
-            if warmed < WARMUP_BLOCKS:
-                warmed += 1
-                continue
-
             level = _rms(chunk)
             if on_level is not None:
-                on_level(min(1.0, level / 12000.0))
+                decibels = 20 * math.log10(max(1.0, level) / 32768.0)
+                on_level(max(0.0, min(1.0, (decibels + 60.0) / 60.0)))
             model_speech, model_done = _recognizer_signals(recognizer, chunk)
+            pre_roll_limit = max(PRE_ROLL_BLOCKS, WARMUP_BLOCKS + 4) if recognizer is not None else PRE_ROLL_BLOCKS
+
+            # Feed the acoustic detector immediately; warmup must not swallow
+            # speech spoken as soon as Listen is pressed.
+            if warmed < WARMUP_BLOCKS and not model_speech and not speaking:
+                warmed += 1
+                if recognizer is not None:
+                    pre_roll.append(chunk)
+                    pre_roll = pre_roll[-pre_roll_limit:]
+                continue
 
             if not speaking:
                 pre_roll.append(chunk)
-                if len(pre_roll) > PRE_ROLL_BLOCKS:
+                if len(pre_roll) > pre_roll_limit:
                     pre_roll.pop(0)
 
                 loud_streak = loud_streak + 1 if level >= background.strong_onset else 0
@@ -364,6 +370,7 @@ def record_utterance(
                 )
                 if model_speech or loud_enough:
                     speaking = True
+                    release_level = min(background.release, max(25.0, level * 0.35))
                     notify("recording")
                     collected.extend(pre_roll)
                     continue
@@ -376,7 +383,7 @@ def record_utterance(
             collected.append(chunk)
             if model_done:
                 break
-            if level < background.release:
+            if level < release_level:
                 quiet_for += block_seconds
                 if quiet_for >= silence_seconds:
                     break
@@ -577,6 +584,7 @@ class WakeWordListener:
             if str(phrase).strip()
         ] or ["marlin"]
         self._recognizer: Any | None = None
+        self.handoff_wav = b''
 
     def _build_recognizer(self) -> Any:
         vosk = _import_vosk()
@@ -604,6 +612,8 @@ class WakeWordListener:
         timeout: float | None = None,
         cancel_event: threading.Event | None = None,
         device: int | str | None = None,
+        capture_command: bool = False,
+        on_detected: Callable[[], None] | None = None,
     ) -> bool:
         """Block until a wake phrase is heard. Returns False on timeout."""
 
@@ -612,6 +622,12 @@ class WakeWordListener:
             self._recognizer = self._build_recognizer()
         recognizer = self._recognizer
         recognizer.Reset()
+        self.handoff_wav = b''
+        recent: list[bytes] = []
+        detected = False
+        quiet = 0.0
+        capture_until = 0.0
+        release_level = 180.0
 
         audio_queue: queue.Queue[bytes] = queue.Queue()
 
@@ -642,12 +658,37 @@ class WakeWordListener:
                 except queue.Empty:
                     continue
 
+                recent.append(chunk)
+                if not detected:
+                    recent = recent[-12:]
+                if detected:
+                    quiet = quiet + .25 if _rms(chunk) < release_level else 0.0
+                    if quiet >= .5 or time.monotonic() >= capture_until:
+                        self.handoff_wav = _pcm_to_wav(b''.join(recent))
+                        return True
+                    continue
                 if recognizer.AcceptWaveform(chunk):
                     if self.matches(json.loads(recognizer.Result()).get("text", "")):
                         recognizer.Reset()
+                        if capture_command:
+                            detected = True
+                            capture_until = time.monotonic() + 6
+                            levels = [_rms(value) for value in recent]
+                            release_level = max(180.0, min(min(levels) * 1.4, max(levels) * .6), max(levels) * .25)
+                            if on_detected:
+                                on_detected()
+                            continue
                         return True
                 elif self.matches(json.loads(recognizer.PartialResult()).get("partial", "")):
                     recognizer.Reset()
+                    if capture_command:
+                        detected = True
+                        capture_until = time.monotonic() + 6
+                        levels = [_rms(value) for value in recent]
+                        release_level = max(180.0, min(min(levels) * 1.4, max(levels) * .6), max(levels) * .25)
+                        if on_detected:
+                            on_detected()
+                        continue
                     return True
 
 

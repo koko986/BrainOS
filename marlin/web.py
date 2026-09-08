@@ -36,6 +36,10 @@ class VoiceDeviceBody(BaseModel):
     device: str = Field(default="", max_length=200)
 
 
+class VoiceListenBody(BaseModel):
+    execute: bool = False
+
+
 def create_app(runtime: MarlinRuntime | None = None) -> FastAPI:
     marlin = runtime or MarlinRuntime()
     token = secrets.token_urlsafe(32)
@@ -72,6 +76,10 @@ def create_app(runtime: MarlinRuntime | None = None) -> FastAPI:
     def state() -> dict[str, Any]:
         return marlin.status()
 
+    @app.get('/api/health')
+    def health() -> dict[str, str]:
+        return {'version': '2.0'}
+
     @app.get("/api/graph")
     def graph(limit: int = 1000) -> dict[str, Any]:
         return marlin.graph(limit)
@@ -79,7 +87,11 @@ def create_app(runtime: MarlinRuntime | None = None) -> FastAPI:
     @app.post("/api/commands")
     def command(body: CommandBody, x_marlin_token: str | None = Header(default=None)) -> dict[str, Any]:
         require_token(x_marlin_token)
-        return marlin.command(body.text, source=body.source)
+        result = marlin.command(body.text, source=body.source)
+        if marlin._chat_paused.is_set() and not result.get('pending'):
+            marlin._chat_paused.clear()
+            marlin.events.publish('voice.chat.resumed')
+        return result
 
     @app.post("/api/actions/{action_id}/approve")
     def approve(action_id: str, x_marlin_token: str | None = Header(default=None)) -> dict[str, Any]:
@@ -91,15 +103,41 @@ def create_app(runtime: MarlinRuntime | None = None) -> FastAPI:
         require_token(x_marlin_token)
         return marlin.cancel_action(action_id)
 
-    @app.post("/api/voice/listen")
-    def listen(x_marlin_token: str | None = Header(default=None)) -> dict[str, Any]:
+    @app.post('/api/desktop/{action}')
+    def desktop_control(action: str, x_marlin_token: str | None = Header(default=None)) -> dict[str, Any]:
         require_token(x_marlin_token)
-        return marlin.listen(execute=False)
+        if action not in {'show', 'hide', 'exit'}:
+            raise HTTPException(status_code=400, detail='Unknown desktop action.')
+        if marlin.desktop is None:
+            raise HTTPException(status_code=409, detail='MARLIN is running in server mode, not desktop mode.')
+        return {'message': marlin.desktop.control(action)}
+
+    @app.post("/api/voice/interrupt")
+    def interrupt(x_marlin_token: str | None = Header(default=None)) -> dict[str, Any]:
+        require_token(x_marlin_token)
+        marlin.stop_voice()
+        marlin._chat_paused.clear()
+        return marlin.start_voice_chat()
+
+    @app.post("/api/voice/listen")
+    def listen(body: VoiceListenBody | None = None, x_marlin_token: str | None = Header(default=None)) -> dict[str, Any]:
+        require_token(x_marlin_token)
+        return marlin.listen(execute=bool(body and body.execute))
 
     @app.post("/api/voice/stop")
     def stop_voice(x_marlin_token: str | None = Header(default=None)) -> dict[str, Any]:
         require_token(x_marlin_token)
         return marlin.stop_voice()
+
+    @app.post("/api/voice/chat/start")
+    def start_voice_chat(x_marlin_token: str | None = Header(default=None)) -> dict[str, Any]:
+        require_token(x_marlin_token)
+        return marlin.start_voice_chat()
+
+    @app.post("/api/voice/chat/stop")
+    def stop_voice_chat(x_marlin_token: str | None = Header(default=None)) -> dict[str, Any]:
+        require_token(x_marlin_token)
+        return marlin.stop_voice_chat()
 
     @app.post("/api/voice/device")
     def voice_device(body: VoiceDeviceBody, x_marlin_token: str | None = Header(default=None)) -> dict[str, Any]:
@@ -119,6 +157,24 @@ def create_app(runtime: MarlinRuntime | None = None) -> FastAPI:
         result = marlin.store.snooze_alarm(alarm_id, body.minutes)
         if result is None:
             raise HTTPException(status_code=404, detail="Alarm not found.")
+        return result
+
+    @app.post('/api/reminders/{reminder_id}/complete')
+    def complete_reminder(reminder_id: str, x_marlin_token: str | None = Header(default=None)) -> dict[str, Any]:
+        require_token(x_marlin_token)
+        result = marlin.store.update_reminder(reminder_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail='Reminder not found.')
+        marlin.events.publish('reminder.updated', reminder=result)
+        return result
+
+    @app.post('/api/reminders/{reminder_id}/snooze')
+    def snooze_reminder(reminder_id: str, body: SnoozeBody, x_marlin_token: str | None = Header(default=None)) -> dict[str, Any]:
+        require_token(x_marlin_token)
+        result = marlin.store.update_reminder(reminder_id, minutes=body.minutes)
+        if result is None:
+            raise HTTPException(status_code=404, detail='Reminder not found.')
+        marlin.events.publish('reminder.updated', reminder=result)
         return result
 
     @app.websocket("/api/events")

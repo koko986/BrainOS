@@ -11,8 +11,8 @@ body { background: #05080b; }
 #cockpit { position: relative; isolation: isolate; }
 #brain { position: absolute; inset: 0; width: 100%; height: 100%; background: #05080b; cursor: grab; }
 #brain:active { cursor: grabbing; }
-.brand { position: fixed; top: 16px; left: 20px; z-index: 3; font-size: 18px; font-weight: 750; pointer-events: none; }
-.brand span { color: #5cd8ca; font-size: 11px; font-weight: 650; }
+.brand { position: fixed; top: 22px; left: 24px; z-index: 3; font-size: 22px; font-weight: 750; pointer-events: none; }
+.brand span { display: block; margin-top: 4px; color: #a9b8b4; font-size: 10px; font-weight: 500; }
 .panel { position: fixed; z-index: 5; background: rgba(7, 13, 18, .88); border: 1px solid rgba(78, 111, 131, .66); border-radius: 7px; backdrop-filter: blur(12px); box-shadow: 0 12px 34px rgba(0,0,0,.32); }
 .panel header { padding: 9px 11px; color: #92aabe; font-size: 11px; font-weight: 750; border-bottom: 1px solid rgba(78,111,131,.35); cursor: move; }
 .compact { width: 220px; padding-bottom: 8px; font-size: 12px; }
@@ -29,10 +29,20 @@ body { background: #05080b; }
 .message.user { margin-left: auto; border-color: rgba(72,130,174,.7); }
 .message.thinking { color: #aebbc5; font-style: italic; }
 .command-dock { position: fixed; z-index: 8; left: 50%; bottom: 20px; transform: translateX(-50%); width: min(420px, calc(100vw - 24px)); }
-.voice-controls { display: flex; justify-content: center; gap: 7px; margin-bottom: 8px; }
-.voice-monitor { height: 22px; margin: -3px 5px 5px; display: grid; grid-template-columns: auto 70px minmax(90px, 140px); align-items: center; justify-content: center; gap: 8px; color: #91a8b7; font-size: 10px; }
+.voice-controls { display: flex; justify-content: center; flex-wrap: wrap; gap: 6px; margin: 0 auto 10px; }
+#controlFeedback { position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%); padding: 7px 12px; margin-bottom: 8px; max-width: 100%; width: max-content; background: #13221f; color: #b5edcf; border: 1px solid #396757; border-radius: 6px; font-size: 12px; opacity: 0; pointer-events: none; transition: opacity .15s; }
+#controlFeedback.visible { opacity: 1; }
+#controlFeedback.error { background: #301b22; color: #ffc4d0; border-color: #854657; }
+.messages { bottom: 250px; }
+button:active { transform: translateY(1px); }
+button:focus-visible, select:focus-visible, #commandInput:focus-visible { outline: 2px solid #82d9bf; outline-offset: 3px; }
+button[aria-busy="true"] { border-color: #e0cb6c; color: #f5e6a3; }
+button[aria-pressed="true"] { background: #23483c; border-color: #71caa5; }
+button:disabled { cursor: wait; opacity: .7; }
+.voice-monitor { min-height: 22px; margin: -3px 5px 5px; display: grid; grid-template-columns: minmax(0, 1fr) 60px minmax(75px, 1fr); align-items: center; gap: 6px; color: #91a8b7; font-size: 10px; }
+#voiceState { overflow-wrap: anywhere; }
 .level-track { width: 70px; height: 3px; background: rgba(73,104,122,.38); overflow: hidden; }
-#voiceLevel { width: 0; height: 100%; background: #5cd8ca; transition: width 70ms linear; }
+#voiceLevel { width: 0; height: 100%; background: #5cd8ca; }
 #microphone { min-width: 0; width: 100%; border: 0; outline: 0; background: transparent; color: #91a8b7; font: inherit; text-overflow: ellipsis; }
 #microphone option { background: #0a1116; color: #dce8ee; }
 button { border: 1px solid #456176; background: rgba(17,29,38,.94); color: #edf5f9; min-height: 34px; padding: 6px 11px; border-radius: 7px; font: inherit; cursor: pointer; }
@@ -53,13 +63,57 @@ button.primary, button.run { background: #183e48; border-color: #43a99d; }
 .confirm pre { max-height: 220px; overflow: auto; padding: 9px; background: #05090c; color: #b8d7cf; border: 1px solid #293c49; font-size: 11px; white-space: pre-wrap; }
 .confirm-actions { display: flex; justify-content: flex-end; gap: 8px; }
 #graphLegend { position: fixed; left: 18px; bottom: 16px; z-index: 2; color: #78909f; font-size: 11px; pointer-events: none; }
+#routinePanel { width: min(300px, calc(100vw - 24px)); }
+#routineContent { max-height: 42vh; overflow-y: auto; padding: 10px; }
+#routineContent h3 { font-size: 12px; margin: 12px 0 6px; color: #66d4be; }
+.reminder-row { border-left: 2px solid #407c75; padding: 8px; margin-bottom: 8px; overflow-wrap: anywhere; }
+.reminder-row p { margin: 6px 0; font-size: 11px; white-space: pre-wrap; }
+.reminder-row small, .reminder-row summary { font-size: 11px; color: #b0bfcd; }
+.reminder-row summary { cursor: pointer; margin-top: 8px; }
+.new-reminder { border-color: #f3d65d; background: #20251d; }
+.reminder-controls { display: flex; gap: 8px; margin-top: 8px; }
+.reminder-controls button { width: 32px; height: 32px; padding: 0; }
+#routinePanel footer { font-size: 10px; padding: 8px 10px; color: #9aabb4; }
+.panel-switches { position: fixed; top: 22px; right: 24px; z-index: 9; display: flex; gap: 8px; }
+.panel-switches button { background: #171c1c; border-color: #394542; font-size: 12px; }
+#statusPanel, #routinePanel { visibility: hidden; top: 76px; }
+#statusPanel.revealed, #routinePanel.revealed { visibility: visible; }
+.command-dock { width: min(390px, calc(100vw - 24px)); bottom: 24px; }
+.voice-controls button { min-height: 32px; padding: 6px 9px; font-size: 11px; background: #161d1c; border-color: #394842; }
+#talkNow { color: #0c1913; background: #b0e4c0; border-color: #b0e4c0; font-weight: 650; }
+#talkNow:hover { background: #d0f3d9; }
+.voice-session #brain { opacity: .42; filter: saturate(.72); }
+.voice-session .brand, .voice-session .panel-switches, .voice-session #graphLegend { opacity: .55; }
+.voice-session .messages { max-height: 42vh; }
+.voice-session #listen, .voice-session #openCamera, .voice-session .voice-monitor select { display: none; }
+.voice-session .voice-monitor { grid-template-columns: 1fr 90px; width: 230px; margin: 0 auto 7px; }
+.voice-session #voiceState { color: #d3eadc; text-align: center; }
+.voice-session .command-dock::before { content: "VOICE SESSION"; display: block; margin-bottom: 8px; color: #9fc4ae; text-align: center; font-size: 10px; font-weight: 700; }
+#brain, .brand, .panel-switches, #graphLegend { transition: opacity .22s ease-out, filter .22s ease-out; }
+#commandForm { background: #121817; border-color: #667b70; padding: 7px; box-shadow: 0 8px 32px #0006; }
+#commandInput { font-size: 14px; caret-color: #b0e4c0; }
+#commandInput::placeholder { color: #a8b4ae; }
+button.run { background: #d6e9df; color: #14251b; border-color: transparent; font-size: 12px; font-weight: 650; }
+.messages { width: min(470px, calc(100vw - 28px)); bottom: 205px; max-height: 30vh; gap: 10px; }
+.message { background: #111918ed; border-color: #3c4b45; padding: 12px 15px; line-height: 1.55; }
+.message.user { color: #cee4d7; background: #1c2923ed; border-color: #526b5c; }
+::selection { background: #4c7c63; color: #fff; }
+* { scrollbar-width: thin; scrollbar-color: #53665b #111817; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 @media (max-width: 760px) {
+  #routinePanel { width: min(210px, calc(100vw - 24px)); }
   .brand { top: 10px; left: 12px; }
   .compact { width: 170px; }
   #statusPanel { top: 40px; left: 10px; }
+  #statusPanel { width: 140px; }
+  .status-row { gap: 5px; flex-wrap: wrap; }
+  .status-row span { overflow-wrap: anywhere; min-width: 0; }
   #routinePanel { top: 40px; right: 10px; }
-  .messages { bottom: 126px; }
+  .messages { bottom: 225px; }
   .command-dock { bottom: 12px; width: min(380px, calc(100vw - 18px)); }
   #graphLegend { display: none; }
   .voice-monitor { grid-template-columns: auto 55px 90px; }
+  .panel-switches { top: 12px; right: 12px; }
+  .brand { font-size: 18px; }
+  .brand span { font-size: 8px; }
 }
