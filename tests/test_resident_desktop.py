@@ -40,7 +40,7 @@ def test_self_commands_bypass_model_and_use_desktop(tmp_path, monkeypatch):
     runtime.desktop = Mock()
     runtime.desktop.control.return_value = 'Done'
     monkeypatch.setattr(runtime.model, 'chat', lambda *a, **kw: (_ for _ in ()).throw(AssertionError('model called')))
-    for text, action in [('show yourself', 'show'), ('where are you?', 'show'), ('hide marlin', 'hide'), ('close', 'exit'), ('close marlin', 'exit'), ('turn yourself off', 'exit'), ('exit marlin', 'exit')]:
+    for text, action in [('show yourself', 'show'), ('where are you?', 'show'), ('hide marlin', 'hide'), ('close', 'exit'), ('close marlin', 'exit'), ('turn yourself off', 'exit'), ('turnoff hisself', 'exit'), ('MARLIN, please shut yourself down now', 'exit'), ('go offline', 'exit'), ('exit marlin', 'exit')]:
         runtime.command(text)
         runtime.desktop.control.assert_called_with(action)
     monkeypatch.setattr(runtime.actions.youtube, 'close_tab', lambda: {'ok': True, 'message': 'Closed my tab.'})

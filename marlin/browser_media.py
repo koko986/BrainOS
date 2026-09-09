@@ -1,8 +1,10 @@
 """YouTube playback in a dedicated, visible Chrome profile."""
 
 from concurrent.futures import Future
+import os
 from pathlib import Path
 from queue import Queue
+import subprocess
 import threading
 from urllib.parse import urlencode
 from urllib.parse import urlparse
@@ -46,8 +48,26 @@ class YouTubePlayer:
                         context = None
                 if context is None:
                     context = self._launch_browser(driver)
-                    page = context.pages[0] if context.pages else context.new_page()
-                result.set_result(self._play_page(page, query))
+                    # Chrome's startup tab can be replaced while a persistent
+                    # profile is restoring. Use a fresh, stable automation tab.
+                    page = context.new_page()
+                try:
+                    payload = self._play_page(page, query)
+                except Exception as exc:
+                    if not self._recoverable_navigation_error(exc):
+                        raise
+                    page = self._replacement_page(context, page)
+                    payload = self._play_page(page, query)
+                if not payload.get('ok') and self._open_desktop_player(payload.get('url', '')):
+                    title = payload.get('title') or query
+                    payload = {
+                        **payload,
+                        'ok': True,
+                        'desktop_app': True,
+                        'playback_verified': False,
+                        'message': f'Opened {title} in YouTube Desktop and requested autoplay.',
+                    }
+                result.set_result(payload)
             except ImportError:
                 result.set_exception(ValueError('YouTube control needs Playwright. Run py -m pip install playwright, then restart MARLIN.'))
             except Exception as exc:
@@ -69,6 +89,36 @@ class YouTubePlayer:
             except Exception as exc:
                 errors.append(str(exc))
         raise ValueError('Could not launch Chrome or Edge. Install either browser, then retry music playback. ' + errors[-1][:200])
+
+    @staticmethod
+    def _recoverable_navigation_error(exc: Exception) -> bool:
+        message = str(exc).lower()
+        return 'err_aborted' in message or 'frame was detached' in message or 'target page' in message
+
+    @staticmethod
+    def _replacement_page(context, previous):
+        pages = [page for page in context.pages if not page.is_closed() and page is not previous]
+        for page in reversed(pages):
+            if urlparse(page.url).hostname in {'youtube.com', 'www.youtube.com', 'music.youtube.com'}:
+                return page
+        return context.new_page()
+
+    @staticmethod
+    def _open_desktop_player(url: str) -> bool:
+        if urlparse(str(url)).hostname not in {'youtube.com', 'www.youtube.com', 'music.youtube.com'}:
+            return False
+        executable = Path(os.getenv('LOCALAPPDATA', '')) / 'YouTube Desktop' / 'ytdesktop.exe'
+        if not executable.is_file():
+            return False
+        separator = '&' if '?' in url else '?'
+        try:
+            subprocess.Popen(
+                [str(executable), f'{url}{separator}autoplay=1'],
+                close_fds=True,
+            )
+        except OSError:
+            return False
+        return True
 
     @staticmethod
     def _close_page(page) -> dict:

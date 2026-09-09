@@ -7,6 +7,7 @@ import os
 import re
 import time
 import threading
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -14,7 +15,12 @@ from marlin.actions import ActionOutcome, ComputerActionService
 from marlin.config import MarlinSettings
 from marlin.events import EventBus
 from marlin.indexer import IncrementalIndexer, IndexProgress
+from marlin.file_understanding import FileUnderstandingService
 from marlin.local_model import LocalModelUnavailable, OllamaLocalModel
+from marlin.notifications import play_notification_sound
+from marlin.planner import ScheduleService
+from marlin.preferences import PreferenceService
+from marlin.research import InternetResearchService
 from marlin.routine import AssistantState, RoutineService
 from marlin.storage import MarlinStore
 from marlin.voice import LocalVoiceService
@@ -70,6 +76,13 @@ class MarlinRuntime:
         self.backup_path = self.store.migrate()
         self.knowledge = KnowledgeService(self.settings.database_path)
         self.reasoning = ReasoningService(self.knowledge, self.settings.prolog_dir)
+        # Load SWI-Prolog before Whisper/Piper load native DLLs. On Windows,
+        # importing those libraries first can make PySWIP fail with WinError 127.
+        self.prolog_startup_error = ""
+        try:
+            self.reasoning.engine.load()
+        except PrologUnavailable as exc:
+            self.prolog_startup_error = str(exc)
         self.events = EventBus()
         self.state = AssistantState(self.store, self.events)
         self.voice = LocalVoiceService(self.settings, self.events)
@@ -78,6 +91,13 @@ class MarlinRuntime:
         self.actions = ComputerActionService(self.store)
         self.model = OllamaLocalModel(self.settings)
         self.indexer = IncrementalIndexer(self.knowledge, self.store)
+        self.schedule = ScheduleService(self.store, self.reasoning, self.events)
+        self.preferences = PreferenceService(self.store, self.events)
+        self.files = FileUnderstandingService(self.settings, self.store, self.reasoning)
+        # Return inspected sources immediately. A second local-model pass made
+        # healthy internet searches appear to hang for tens of seconds.
+        self.research = InternetResearchService(self.store, self.reasoning, self.events)
+        self._last_prolog_activity: dict[str, Any] = {}
         self.routine = RoutineService(
             self.settings,
             self.store,
@@ -85,6 +105,7 @@ class MarlinRuntime:
             self.state,
             self.events,
             on_alarm=self._alarm_fired,
+            on_reminder=self._reminder_fired,
         )
         self._wake_stop = threading.Event()
         self._wake_thread: threading.Thread | None = None
@@ -117,6 +138,25 @@ class MarlinRuntime:
 
         if self.state.value == "standby" and "wake up" not in prompt.lower():
             return self._reply("MARLIN is standing by. Say MARLIN, wake up.")
+
+        preference = self.preferences.handle(prompt)
+        if preference is not None:
+            return self._preference_reply(preference)
+
+        try:
+            schedule = self.schedule.handle(prompt)
+            if schedule is not None:
+                return self._schedule_reply(schedule)
+            research = self.research.handle(prompt)
+            if research is not None:
+                return self._research_reply(research)
+            file_result = self.files.handle(prompt)
+            if file_result is not None:
+                return self._file_reply(file_result)
+        except PrologUnavailable as exc:
+            return self._reply(f"Prolog is unavailable: {exc}", ok=False)
+        except (OSError, ValueError, PermissionError, ConnectionError) as exc:
+            return self._reply(str(exc), ok=False)
 
         routine_reply = self.routine.handle(prompt)
         if routine_reply is not None:
@@ -193,7 +233,11 @@ class MarlinRuntime:
             return True
         if "confidence" not in heard:
             return True
-        return float(heard.get("confidence") or 0.0) >= 0.62 and not bool(heard.get("low_confidence"))
+        return (
+            float(heard.get("confidence") or 0.0) >= 0.90
+            and not bool(heard.get("low_confidence"))
+            and not bool(heard.get("requires_clarification"))
+        )
 
     def _mark_uncertain_camera(self, heard: dict[str, Any]) -> None:
         heard["requires_clarification"] = True
@@ -406,7 +450,10 @@ class MarlinRuntime:
             "voice_chat": self.voice_chat_active,
             "voice_chat_paused": self._chat_paused.is_set(),
             "model": model,
-            "prolog": {"available": self.reasoning.engine.is_available()},
+            "prolog": {
+                "available": self.reasoning.engine.loaded,
+                "error": self.prolog_startup_error,
+            },
             "voice": self.voice.status(),
             "index": self.index_status,
             "index_progress": self.index_progress,
@@ -415,9 +462,89 @@ class MarlinRuntime:
             "alarms": self.store.list_alarms(),
             "reminders": self.store.list_reminders(pending_only=False),
             "reminder_storage": str(self.store.database_path.resolve()),
+            "schedule_items": self.store.list_schedule_items(),
+            "schedule_plan": self.store.latest_schedule_plan(),
+            "preferences": self.store.list_preferences(),
+            "research": self.store.recent_research(3),
+            "prolog_activity": self._last_prolog_activity,
             "recent_actions": self.store.recent_actions(12),
             "backup": str(self.backup_path) if self.backup_path else "",
         }
+
+    def _summarize_research(self, prompt: str) -> str:
+        turn = self.model.chat([
+            {"role": "system", "content": "Summarise supplied web evidence only. Be concise and retain [number] citations."},
+            {"role": "user", "content": prompt},
+        ])
+        return turn.content
+
+    def _schedule_reply(self, result: dict[str, Any]) -> dict[str, Any]:
+        kind = result["kind"]
+        plan = result.get("plan")
+        if plan:
+            self._last_prolog_activity = {
+                "predicate": "schedule_tasks/6", "facts": len(plan.get("blocks", [])),
+                "rules": plan.get("explanation", {}).get("rules", []),
+                "result": plan.get("status"), "proof": plan.get("explanation", {}),
+            }
+        if kind == "preview" or (kind == "created" and result.get("plan")):
+            plan = result.get("plan")
+            count = len((plan or {}).get("blocks", []))
+            unscheduled = len((plan or {}).get("explanation", {}).get("unscheduled", []))
+            return self._reply(f"Prolog prepared a schedule preview with {count} blocks and {unscheduled} unscheduled tasks. Apply or discard it.", data={"schedule": result})
+        if kind == "created": return self._reply(f"Scheduled task saved: {result['item']['title']}.", data={"schedule": result})
+        if kind == "event_created":
+            item = result["item"]
+            start = datetime.fromisoformat(item["start_at"]).astimezone().strftime("%A, %d %B at %I:%M %p")
+            return self._reply(f"Schedule event saved: {item['title']} on {start}.", data={"schedule": result})
+        if kind == "clarification":
+            return self._reply(result["message"], ok=False, data={"schedule": result})
+        if kind == "applied": return self._reply("Schedule applied." if plan else "There is no preview to apply.", ok=bool(plan), data={"schedule": result})
+        if kind == "discarded": return self._reply("Schedule preview discarded." if plan else "There is no preview to discard.", data={"schedule": result})
+        if kind == "conflicts":
+            conflicts = result["conflicts"]
+            self._last_prolog_activity = {"predicate": "interval_conflict/4", "facts": len(conflicts), "rules": ["overlapping_intervals"], "result": conflicts}
+            return self._reply(f"Prolog found {len(conflicts)} schedule conflicts.", data={"schedule": result, "prolog_activity": self._last_prolog_activity})
+        if kind == "explanation":
+            block = result.get("block")
+            reasons = (block or {}).get("explanation", {}).get("reasons", [])
+            return self._reply(" ".join(reasons) if reasons else "I could not find that schedule block.", ok=bool(block), data={"schedule": result})
+        return self._reply(f"Your schedule contains {len(result.get('items', []))} items.", data={"schedule": result})
+
+    def _preference_reply(self, result: dict[str, Any]) -> dict[str, Any]:
+        if result["kind"] == "list":
+            prefs = result["preferences"]
+            message = "I remember: " + "; ".join(f"{p['category'].replace('_', ' ')} = {p['value']}" for p in prefs) if prefs else "I have no active preferences saved."
+        elif result["kind"] == "forgotten": message = f"Forgotten {result['count']} matching preference." if result["count"] else "I could not find that preference."
+        else:
+            pref = result["preference"]
+            message = f"I will remember that you prefer {pref['value']}." if pref.get("active") else "I noted that pattern; I will wait for more evidence before treating it as a preference."
+        return self._reply(message, data={"memory": result})
+
+    def _research_reply(self, result: dict[str, Any]) -> dict[str, Any]:
+        if "clarification" in result:
+            return self._reply(result["clarification"], ok=False, data={"research": result}, speak=False)
+        run = result if "sources" in result else (result.get("runs") or [{}])[0]
+        if "saved" in result:
+            return self._reply("Source saved to BrainOS." if result["saved"] else "I could not find that source.", ok=bool(result["saved"]), data={"research": result})
+        if not run:
+            return self._reply("No research has been saved yet.", data={"research": result})
+        self._last_prolog_activity = {"predicate": "source_quality/2", "facts": len(run.get("sources", [])), "rules": ["freshness", "domain_diversity", "search_position"], "result": "ranked"}
+        return self._reply(run.get("summary") or f"Found {len(run.get('sources', []))} sources.", data={"research": run, "prolog_activity": self._last_prolog_activity}, speak=False)
+
+    def _file_reply(self, result: dict[str, Any]) -> dict[str, Any]:
+        item = result["result"]
+        if result["kind"] == "project":
+            message = f"I found {item['files']} project files. Main technologies: {', '.join(item['technologies']) or 'not identified'}."
+        elif result["kind"] == "related":
+            message = f"Prolog found {len(item['related'])} related files."
+        elif result["kind"] == "impact":
+            message = f"Changing this file could affect {len(item['affected'])} files."
+        else:
+            message = item.get("summary", "File analysis complete.")[:500]
+        if item.get("predicate"):
+            self._last_prolog_activity = {"predicate": item["predicate"], "facts": len(item.get("related", item.get("affected", []))), "rules": ["imports", "shared_concept", "same_project"], "result": item}
+        return self._reply(message, data={"file_understanding": result, "prolog_activity": self._last_prolog_activity}, speak=False)
 
     def graph(self, limit: int = 1200) -> dict[str, Any]:
         limit = max(100, min(limit, 2000))
@@ -513,9 +640,22 @@ class MarlinRuntime:
 
     def _deterministic(self, prompt: str) -> dict[str, Any] | None:
         command = " ".join(prompt.lower().split()).rstrip('.!?')
+        command = re.sub(r"^marlin[, ]+", "", command).strip()
+        command = re.sub(r"\bturnoff\b", "turn off", command)
+        command = re.sub(r"\bhisself\b|\bhis self\b", "yourself", command)
+        polite_command = re.sub(r"^please\s+", "", command)
+        polite_command = re.sub(r"\s+(?:please|now)$", "", polite_command).strip()
+        self_exit = bool(re.fullmatch(
+            r"(?:(?:turn|switch)\s+(?:yourself|your self|marlin)\s+off|"
+            r"(?:turn|switch)\s+off\s+(?:yourself|your self|marlin)|"
+            r"(?:shut|power)\s+(?:yourself|your self|marlin)\s+down|"
+            r"(?:shut|power)\s+down\s+(?:yourself|your self|marlin)|"
+            r"(?:close|exit|quit|stop)\s+(?:yourself|your self|marlin)|go offline)",
+            polite_command,
+        ))
         desktop_action = ('show' if command in {'show yourself', 'where are you', 'show marlin', 'open marlin', 'show the cockpit'}
                           else 'hide' if command in {'hide yourself', 'hide marlin', 'hide the cockpit', 'go to background'}
-                          else 'exit' if command in {
+                          else 'exit' if self_exit or command in {
                               'close', 'close yourself', 'close marlin', 'exit', 'exit marlin', 'quit', 'quit marlin',
                               'turn off', 'turn off yourself', 'turn yourself off', 'turn off marlin',
                               'turn marlin off', 'power off', 'power off marlin', 'close down',
@@ -528,7 +668,12 @@ class MarlinRuntime:
             return self._reply(self.desktop.control(desktop_action))
         if command in {'close that tab', 'close this tab', 'close that tap', 'close youtube', 'close the youtube tab'}:
             return self._action_reply(self.actions.invoke('close_browser_tab', {}))
-        music = re.fullmatch(r'(?:please\s+)?(?:open\s+youtube\s*,?\s*(?:and|then|&)\s*play\s+(.+)|play\s+(.+?)\s+on\s+youtube|play\s+(some music|music))\s*[.!?]?', prompt.strip(), re.I)
+        music = re.fullmatch(
+            r'(?:please\s+)?(?:open\s+(?:the\s+)?(?:desktop\s+)?youtube(?:\s+desktop)?\s*,?\s*'
+            r'(?:and|then|&)\s*play\s+(.+)|play\s+(.+?)\s+on\s+youtube|play\s+(some music|music))\s*[.!?]?',
+            prompt.strip(),
+            re.I,
+        )
         if music:
             query = next(value for value in music.groups() if value).strip().rstrip('.!?')
             if query.lower() in {'some music', 'music', 'any music'}:
@@ -536,13 +681,22 @@ class MarlinRuntime:
             return self._action_reply(self.actions.invoke('play_youtube', {'query': query}))
         if command == "stop voice":
             return self.stop_voice()
-        if command in {"open camera", "start camera", "turn on camera"}:
-            return self._action_reply(self.actions.invoke("open_camera", {}))
+        if self._is_camera_command(command):
+            return self._action_reply(self.actions.invoke("open_camera", {"_explicit_command": True}))
         if command in {"close camera", "stop camera", "turn off camera"}:
             return self._action_reply(self.actions.invoke("close_camera", {}))
         if command in {"show brain graph", "graph my files", "show graph"}:
             self.events.publish("graph.refresh")
             return self._reply("The brain graph is ready.", data={"graph": True})
+        for prefix in ("why high priority ", "why high-priority "):
+            if command.startswith(prefix):
+                task_id = prompt[len(prefix):].strip()
+                try:
+                    explanation = self.reasoning.why_high_priority(task_id)
+                    self.events.publish("prolog.result", query="why_high_priority", task_id=task_id, steps=explanation.steps)
+                    return self._reply(explanation.title + " " + " ".join(explanation.steps), data={"steps": explanation.steps})
+                except PrologUnavailable as exc:
+                    return self._reply(f"Prolog is unavailable: {exc}")
         if command in {
             "explain graph", "explain the graph", "explain my graph", "explain brain graph",
             "what is in the graph", "what's in the graph", "what does the graph show",
@@ -553,15 +707,6 @@ class MarlinRuntime:
             return self._answer_graph_question(prompt)
         if self._is_high_priority_request(command):
             return self._high_priority_reply(explain_activity=self._asks_for_prolog_activity(command))
-        for prefix in ("why high priority ", "why high-priority "):
-            if command.startswith(prefix):
-                task_id = prompt[len(prefix):].strip()
-                try:
-                    explanation = self.reasoning.why_high_priority(task_id)
-                    self.events.publish("prolog.result", query="why_high_priority", task_id=task_id, steps=explanation.steps)
-                    return self._reply(explanation.title + " " + " ".join(explanation.steps), data={"steps": explanation.steps})
-                except PrologUnavailable as exc:
-                    return self._reply(f"Prolog is unavailable: {exc}")
         match = re.match(r"search (?:my )?files for (.+)", prompt, re.I)
         if match:
             results = self.store.search_files(match.group(1), 30)
@@ -893,6 +1038,10 @@ class MarlinRuntime:
         return any(re.search(rf"\b{re.escape(word)}\b", command) for word in tool_words)
 
     def _execute_model_tool(self, name: str, arguments: dict[str, Any]) -> ActionOutcome:
+        if name == "open_app" and str(arguments.get("app") or "").strip().lower() in {
+            "camera", "the camera", "windows camera", "microsoft camera",
+        }:
+            return ActionOutcome(False, "Camera stayed closed. Use the exact command: open camera.")
         if name == "search_brain":
             results = self.store.search_files(str(arguments.get("query", "")), 25)
             return ActionOutcome(True, f"Found {len(results)} brain matches.", {"files": results})
@@ -931,6 +1080,10 @@ class MarlinRuntime:
         self.events.publish("index.progress", root=root, indexed=0, skipped=0, complete=False)
         try:
             result = self.indexer.index(root, max_files=max_files, on_progress=self._index_progress)
+            if Path(root).resolve() == self.settings.graph_root.resolve():
+                for user_root in (Path.home() / "Desktop", Path.home() / "Documents", Path.home() / "Downloads"):
+                    if user_root.exists() and user_root.resolve() != self.settings.graph_root.resolve():
+                        self.indexer.index(user_root, max_files=max_files, on_progress=self._index_progress)
             self.index_status = "complete" if result.complete else "paused"
             self.events.publish("graph.refresh")
         except Exception as exc:
@@ -945,4 +1098,11 @@ class MarlinRuntime:
         label = str(alarm.get("label") or "Alarm")
         message = f"{label}. Would you like five more minutes?"
         self.events.publish("assistant.done", ok=True, message=message, data={"alarm": alarm})
+        play_notification_sound()
+        self.voice.speak(message)
+
+    def _reminder_fired(self, reminder: dict[str, Any]) -> None:
+        message = f"Reminder: {reminder.get('text') or 'You have something scheduled.'}"
+        self.events.publish("assistant.done", ok=True, message=message, data={"reminder": reminder})
+        play_notification_sound()
         self.voice.speak(message)

@@ -60,6 +60,7 @@ class DesktopController:
         self.exiting = False
         self.ready = False
         self._exit_lock = threading.Lock()
+        self.force_terminate = False
 
     def control(self, action):
         if action == 'show':
@@ -95,6 +96,10 @@ class DesktopController:
     def _exit(self):
         if not self._exit_lock.acquire(blocking=False):
             return
+        if self.force_terminate:
+            watchdog = threading.Timer(3.0, lambda: os._exit(0))
+            watchdog.daemon = True
+            watchdog.start()
         print('Stopping MARLIN runtime...', flush=True)
         try:
             self.runtime.shutdown()
@@ -122,12 +127,25 @@ class DesktopController:
                 self.window.destroy()
         except Exception as exc:
             print(f'Cockpit shutdown warning: {exc}', flush=True)
+        if self.force_terminate:
+            os._exit(0)
 
     def start_tray(self):
         import pystray
-        from PIL import Image, ImageDraw
+        from PIL import Image, ImageDraw, ImageFont
         icon = Image.new('RGB', (64, 64), '#091216')
-        ImageDraw.Draw(icon).text((17, 15), 'M', fill='#60dcc4', font_size=36)
+        draw = ImageDraw.Draw(icon)
+        draw.rounded_rectangle((2, 2, 61, 61), radius=8, outline='#4a6d68', width=2)
+        draw.line((8, 12, 20, 12), fill='#5cd8ca', width=2)
+        draw.line((44, 52, 56, 52), fill='#5cd8ca', width=2)
+        draw.ellipse((5, 9, 11, 15), fill='#5cd8ca')
+        draw.ellipse((53, 49, 59, 55), fill='#f0c85c')
+        try:
+            font = ImageFont.truetype('segoeuib.ttf', 35)
+        except OSError:
+            font = ImageFont.load_default()
+        box = draw.textbbox((0, 0), 'M', font=font)
+        draw.text(((64 - (box[2] - box[0])) / 2, 12), 'M', fill='#d6e9df', font=font)
         self.tray = pystray.Icon('MARLIN', icon, 'MARLIN - listening in background', menu=pystray.Menu(
             pystray.MenuItem('Show MARLIN', lambda: self.control('show'), default=True),
             pystray.MenuItem('Hide cockpit', lambda: self.control('hide')),
@@ -166,6 +184,7 @@ def run_host(settings):
         port = _available_port('127.0.0.1', settings.port)
         url = f'http://127.0.0.1:{port}'
         controller = DesktopController(runtime, url)
+        controller.force_terminate = True
         runtime.desktop = controller
         app = create_app(runtime)
         server = uvicorn.Server(uvicorn.Config(app, host='127.0.0.1', port=port, log_config=None, access_log=False))

@@ -256,7 +256,7 @@ class LocalVoiceService:
     def wake_listener(self) -> WakeWordListener:
         return WakeWordListener(
             str(self.settings.vosk_model_path),
-            parse_wake_words("marlin,hey marlin,hey marlon,hey merlin"),
+            parse_wake_words("hey marlin,hey marlon,hey merlin"),
         )
 
     def wait_for_barge_in(self, stop_event: threading.Event) -> bool:

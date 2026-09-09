@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 import threading
 import time
 from datetime import UTC, datetime, timedelta
@@ -55,6 +56,7 @@ class RoutineService:
         state: AssistantState,
         events: EventBus,
         on_alarm: Callable[[dict[str, Any]], None] | None = None,
+        on_reminder: Callable[[dict[str, Any]], None] | None = None,
     ):
         self.settings = settings
         self.store = store
@@ -62,6 +64,7 @@ class RoutineService:
         self.state = state
         self.events = events
         self.on_alarm = on_alarm
+        self.on_reminder = on_reminder
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self.last_fired_alarm_id = ""
@@ -75,6 +78,8 @@ class RoutineService:
 
     def stop(self) -> None:
         self._stop.set()
+        if self._thread and self._thread.is_alive() and self._thread is not threading.current_thread():
+            self._thread.join(timeout=2.0)
 
     def handle(self, text: str) -> str | None:
         command = " ".join(str(text or "").lower().replace(",", " ").split())
@@ -99,6 +104,23 @@ class RoutineService:
         if command in {"snooze", "five more minutes", "snooze five minutes"} and self.last_fired_alarm_id:
             self.store.snooze_alarm(self.last_fired_alarm_id, 5)
             return "Certainly. I will wake you again in five minutes."
+
+        if command in {
+            "also add reminder", "also add a reminder", "add reminder too",
+            "add a reminder too", "also remind me", "remind me too",
+            "set a reminder for that", "add a reminder for that",
+        }:
+            scheduled = self.store.list_schedule_items()
+            latest = max(scheduled, key=lambda item: item.get("created_at") or "", default=None)
+            if latest:
+                due_text = latest.get("start_at") or latest.get("deadline_at")
+                due = datetime.fromisoformat(due_text).astimezone() if due_text else None
+                item = self.store.add_reminder(str(latest["title"]), due)
+                self.events.publish("reminder.created", reminder=item)
+                if due:
+                    return f"Reminder saved for {due.strftime('%A, %d %B at %I:%M %p')}: {latest['title']}."
+                return f"Reminder saved: {latest['title']}."
+            return "There is no recent scheduled item to use. Tell me what and when to remind you."
 
         alarm = self._parse_alarm(text)
         if alarm:
@@ -161,14 +183,19 @@ class RoutineService:
 
     def _alarm_loop(self) -> None:
         while not self._stop.wait(1.0):
-            for reminder in self.store.claim_due_reminders():
-                self.events.publish('reminder.fired', reminder=reminder)
-            for alarm in self.store.due_alarms():
-                self.last_fired_alarm_id = str(alarm["id"])
-                self.store.mark_alarm_fired(self.last_fired_alarm_id)
-                self.events.publish("alarm.fired", alarm=alarm)
-                if self.on_alarm:
-                    self.on_alarm(alarm)
+            try:
+                for reminder in self.store.claim_due_reminders():
+                    self.events.publish('reminder.fired', reminder=reminder)
+                    if self.on_reminder:
+                        self.on_reminder(reminder)
+                for alarm in self.store.due_alarms():
+                    self.last_fired_alarm_id = str(alarm["id"])
+                    self.store.mark_alarm_fired(self.last_fired_alarm_id)
+                    self.events.publish("alarm.fired", alarm=alarm)
+                    if self.on_alarm:
+                        self.on_alarm(alarm)
+            except sqlite3.OperationalError as exc:
+                self.events.publish("routine.retrying", error=str(exc))
 
     @staticmethod
     def _parse_alarm(text: str) -> tuple[str, datetime] | None:
@@ -195,13 +222,89 @@ class RoutineService:
 
     @staticmethod
     def _parse_reminder(text: str) -> tuple[str, datetime | None] | None:
-        match = re.search(r"remind me (?:to |about )(.+?)\s+in\s+(\d+)\s+(minute|minutes|hour|hours)$", text, re.I)
-        if match:
-            amount = int(match.group(2))
-            delta = timedelta(hours=amount) if match.group(3).lower().startswith("hour") else timedelta(minutes=amount)
-            return match.group(1).strip(), datetime.now().astimezone() + delta
-        match = re.search(r"remind me (?:to |about )(.+)$", text, re.I)
-        return (match.group(1).strip(), None) if match else None
+        raw = " ".join(str(text or "").strip().rstrip(".!?").split())
+        relative = re.search(
+            r"(?:remind me|set (?:a )?reminder|add (?:a )?reminder)(?: to| about| for)?\s+(.+?)\s+in\s+(\d+)\s+(minute|minutes|hour|hours)$",
+            raw,
+            re.I,
+        )
+        if relative:
+            amount = int(relative.group(2))
+            delta = timedelta(hours=amount) if relative.group(3).lower().startswith("hour") else timedelta(minutes=amount)
+            return relative.group(1).strip(), datetime.now().astimezone() + delta
+
+        leading_time = re.match(
+            r"remind me\s+at\s+(.+?)\s+(?:to|about)\s+(.+)$", raw, re.I
+        )
+        if leading_time:
+            due = RoutineService._parse_due_phrase(leading_time.group(1))
+            return (leading_time.group(2).strip(), due) if due else None
+
+        time_first = re.match(
+            r"(?:remind me|set (?:a )?reminder|add (?:a )?reminder)(?: for)?\s+"
+            r"((?:today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday)"
+            r"(?:\s+at)?\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?)\s+(.+)$",
+            raw,
+            re.I,
+        )
+        if time_first:
+            due = RoutineService._parse_due_phrase(time_first.group(1))
+            return (time_first.group(2).strip(), due) if due else None
+
+        command = re.match(
+            r"(?:remind me|set (?:a )?reminder|add (?:a )?reminder|reminder)(?: to| about| for)?\s+(.+)$",
+            raw,
+            re.I,
+        )
+        if not command:
+            return None
+        body = command.group(1).strip()
+        timed = re.match(r"(.+?)\s+(?:at|on)\s+(.+)$", body, re.I)
+        if timed:
+            title = timed.group(1).strip()
+            when = timed.group(2).strip()
+            trailing_day = re.match(
+                r"(.+?)\s+(today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday)$",
+                title,
+                re.I,
+            )
+            if trailing_day:
+                title = trailing_day.group(1).strip()
+                when = f"{trailing_day.group(2)} {when}"
+            due = RoutineService._parse_due_phrase(when)
+            if due:
+                return title, due
+        return body, None
+
+    @staticmethod
+    def _parse_due_phrase(value: str) -> datetime | None:
+        text = " ".join(value.lower().split())
+        now = datetime.now().astimezone()
+        day = now.date()
+        if "tomorrow" in text:
+            day = (now + timedelta(days=1)).date()
+        else:
+            weekdays = {name.lower(): index for index, name in enumerate(("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"))}
+            weekday = next((name for name in weekdays if name in text), None)
+            if weekday:
+                distance = (weekdays[weekday] - now.weekday()) % 7 or 7
+                day = (now + timedelta(days=distance)).date()
+        clock = re.search(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", text)
+        has_day = any(word in text for word in ("today", "tomorrow", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"))
+        if not clock and has_day:
+            return datetime.combine(day, datetime.min.time(), now.tzinfo).replace(hour=9)
+        if not clock:
+            return None
+        hour, minute = int(clock.group(1)), int(clock.group(2) or 0)
+        suffix = (clock.group(3) or "").lower()
+        if hour > 23 or minute > 59 or hour > 12 and suffix:
+            return None
+        if suffix == "pm" and hour < 12: hour += 12
+        if suffix == "am" and hour == 12: hour = 0
+        due = datetime.combine(day, datetime.min.time(), now.tzinfo).replace(hour=hour, minute=minute)
+        if day == now.date() and due <= now and "today" not in text:
+            due += timedelta(days=1)
+        return due
 
     def _weather(self) -> str:
         if not self.settings.weather_enabled:

@@ -160,6 +160,17 @@ def test_clear_camera_transcript_still_opens_immediately(tmp_path, monkeypatch):
     assert opened == ['open_camera']
 
 
+def test_camera_transcript_below_strict_privacy_threshold_is_blocked(tmp_path):
+    runtime = MarlinRuntime(MarlinSettings(database_path=tmp_path / 'brain.db', voice_output=False,
+        auto_index_c_drive=False, weather_enabled=False), start_background=False)
+    heard = {
+        'text': 'open camera', 'confidence': .89, 'low_confidence': False,
+        'requires_clarification': False,
+    }
+
+    assert not runtime._voice_action_allowed(heard)
+
+
 def test_quality_score_rejects_repetition_and_bad_recognition():
     score = FasterWhisperSTT._confidence
     good = SimpleNamespace(no_speech_prob=.01, avg_logprob=-.1, compression_ratio=1)

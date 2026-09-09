@@ -5,19 +5,39 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="marlin-token" content="__MARLIN_TOKEN__">
   <title>MARLIN V2</title>
+  <link rel="icon" href="/assets/marlin-mark.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/assets/styles.css">
 </head>
 <body>
   <main id="cockpit">
     <canvas id="brain" aria-label="MARLIN brain graph"></canvas>
-    <div class="brand">MARLIN <span>LOCAL COMPANION</span></div>
+    <div class="brand">
+      <img src="/assets/marlin-mark.svg" alt="">
+      <div><strong>MARLIN</strong><span>LOCAL COMPANION</span></div>
+    </div>
     <nav class="panel-switches" aria-label="Workspace panels">
       <button id="toggleStatus" aria-expanded="false" aria-controls="statusPanel">System</button>
       <button id="toggleRoutine" aria-expanded="false" aria-controls="routinePanel">Reminders</button>
+      <button id="toggleSchedule" aria-expanded="false" aria-controls="schedulePanel">Schedule</button>
+      <button id="toggleMemory" aria-expanded="false" aria-controls="memoryPanel">Memory</button>
+      <button id="toggleResearch" aria-expanded="false" aria-controls="researchPanel">Research</button>
+      <button id="toggleProlog" aria-expanded="false" aria-controls="prologPanel">Prolog</button>
     </nav>
     <section id="statusPanel" class="panel compact moveable" data-key="status">
       <header>LOCAL SYSTEM</header>
       <div id="statusGrid"></div>
+    </section>
+    <section id="schedulePanel" class="panel agent-panel moveable" data-key="schedule">
+      <header>SCHEDULE PLAN</header><div id="scheduleContent" class="panel-content">No schedule yet.</div>
+    </section>
+    <section id="memoryPanel" class="panel agent-panel moveable" data-key="memory">
+      <header>PREFERENCE MEMORY</header><div id="memoryContent" class="panel-content">No learned preferences.</div>
+    </section>
+    <section id="researchPanel" class="panel agent-panel wide moveable" data-key="research">
+      <header>RESEARCH SOURCES</header><div id="researchContent" class="panel-content">No research yet.</div>
+    </section>
+    <section id="prologPanel" class="panel agent-panel wide moveable" data-key="prolog">
+      <header>PROLOG ACTIVITY</header><div id="prologContent" class="panel-content">No predicate invoked yet.</div>
     </section>
     <section id="routinePanel" class="panel compact moveable" data-key="routine">
       <header>REMINDERS &amp; ALARMS</header>
@@ -48,7 +68,6 @@
         <button id="stopVoice">Stop voice</button>
         <button id="talkNow" title="Interrupt the reply and resume voice conversation">Interrupt &amp; speak</button>
         <button id="listen">Listen</button>
-        <button id="openCamera">Open camera</button>
       </div>
       <div class="voice-monitor" aria-live="polite">
         <span id="voiceState">Voice ready</span>
@@ -62,6 +81,6 @@
     </section>
     <div id="graphLegend">PROJECT KNOWLEDGE</div>
   </main>
-  <script src="/assets/app.js?v=assistant4"></script>
+  <script src="/assets/app.js?v=agent10"></script>
 </body>
 </html>

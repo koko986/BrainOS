@@ -326,6 +326,8 @@ class ComputerActionService:
             self._media_key(command)
             return ActionOutcome(True, f"Media command sent: {command.replace('_', ' ')}.")
         if name == "open_camera":
+            if args.get("_explicit_command") is not True:
+                return ActionOutcome(False, "Camera stayed closed because no explicit camera command was received.")
             self._open_windows_camera()
             self._remember("app", "camera")
             return ActionOutcome(True, "Opened the Windows Camera app.", client_action="open_camera_native")
@@ -458,6 +460,9 @@ class ComputerActionService:
         registry = cls._registered_app_path(candidate)
         if registry:
             return registry
+        shortcut = cls._desktop_shortcut(normalized)
+        if shortcut:
+            return shortcut
         shortcut = cls._start_menu_shortcut(normalized)
         if shortcut:
             return shortcut
@@ -504,7 +509,26 @@ class ComputerActionService:
             Path(os.getenv("APPDATA", "")) / "Microsoft/Windows/Start Menu/Programs",
             Path(os.getenv("PROGRAMDATA", "")) / "Microsoft/Windows/Start Menu/Programs",
         ]
-        wanted = normalized.replace(" ", "")
+        return ComputerActionService._find_shortcut(normalized, roots)
+
+    @staticmethod
+    def _desktop_shortcut(normalized: str) -> str | None:
+        user = Path(os.getenv("USERPROFILE", str(Path.home())))
+        public = Path(os.getenv("PUBLIC", r"C:\Users\Public"))
+        roots = [user / "Desktop", public / "Desktop"]
+        one_drive = os.getenv("OneDrive") or os.getenv("OneDriveConsumer")
+        if one_drive:
+            roots.append(Path(one_drive) / "Desktop")
+        return ComputerActionService._find_shortcut(normalized, roots)
+
+    @staticmethod
+    def _find_shortcut(normalized: str, roots: list[Path]) -> str | None:
+        target = re.sub(r"^(?:the\s+)", "", normalized.strip())
+        target = re.sub(r"^desktop\s+", "", target)
+        target = re.sub(r"\s+(?:desktop\s+)?app(?:lication)?$", "", target)
+        wanted = target.replace(" ", "")
+        exact: list[Path] = []
+        partial: list[tuple[int, int, Path]] = []
         for root in roots:
             if not root.exists():
                 continue
@@ -512,9 +536,17 @@ class ComputerActionService:
                 for shortcut in root.rglob("*.lnk"):
                     stem = shortcut.stem.lower().replace(" ", "")
                     if stem == wanted:
-                        return str(shortcut)
+                        exact.append(shortcut)
+                        continue
+                    if wanted and (wanted in stem or stem.startswith(wanted) or wanted.startswith(stem)):
+                        partial.append((abs(len(stem) - len(wanted)), len(stem), shortcut))
             except OSError:
                 continue
+        if exact:
+            return str(sorted(exact, key=lambda path: (len(str(path)), str(path).lower()))[0])
+        if partial:
+            partial.sort(key=lambda item: (item[0], item[1], str(item[2]).lower()))
+            return str(partial[0][2])
         return None
 
     @staticmethod

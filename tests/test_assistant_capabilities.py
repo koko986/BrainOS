@@ -45,11 +45,28 @@ def test_camera_launches_native_windows_app(tmp_path, monkeypatch):
     monkeypatch.setattr("marlin.actions.sys.platform", "win32")
     monkeypatch.setattr("marlin.actions.subprocess.Popen", lambda command, **kwargs: launched.append(command))
 
-    result = actions.invoke("open_camera", {})
+    result = actions.invoke("open_camera", {"_explicit_command": True})
 
     assert result.ok
     assert result.client_action == "open_camera_native"
     assert launched == [["explorer.exe", r"shell:AppsFolder\Microsoft.WindowsCamera_8wekyb3d8bbwe!App"]]
+
+
+def test_camera_cannot_open_without_an_explicit_command_marker(tmp_path, monkeypatch):
+    runtime = make_runtime(tmp_path)
+    monkeypatch.setattr(
+        runtime.actions,
+        "_open_windows_camera",
+        lambda: (_ for _ in ()).throw(AssertionError("camera opened")),
+    )
+
+    direct = runtime.actions.invoke("open_camera", {})
+    model = runtime._execute_model_tool("open_app", {"app": "Camera"})
+
+    assert not direct.ok
+    assert not model.ok
+    assert "stayed closed" in direct.message
+    assert "stayed closed" in model.message
 
 
 def test_explicit_local_video_bypasses_model_and_uses_default_player(tmp_path, monkeypatch):

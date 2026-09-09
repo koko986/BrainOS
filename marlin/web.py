@@ -40,6 +40,36 @@ class VoiceListenBody(BaseModel):
     execute: bool = False
 
 
+class ScheduleTaskBody(BaseModel):
+    title: str = Field(min_length=1, max_length=500)
+    duration_minutes: int = Field(default=60, ge=30, le=480)
+    deadline_at: str | None = None
+    priority: int = Field(default=50, ge=0, le=100)
+
+
+class SchedulePlanBody(BaseModel):
+    date: str | None = None
+
+
+class ScheduleEventBody(BaseModel):
+    title: str = Field(min_length=1, max_length=500)
+    start_at: str
+    end_at: str
+    recurrence: str = Field(default="none", pattern="^(none|daily|weekday|weekly)$")
+
+
+class ResearchBody(BaseModel):
+    query: str = Field(min_length=1, max_length=500)
+
+
+class FileAnalysisBody(BaseModel):
+    query: str = Field(min_length=1, max_length=2000)
+
+
+class SourceSaveBody(BaseModel):
+    note: str = Field(default="", max_length=1000)
+
+
 def create_app(runtime: MarlinRuntime | None = None) -> FastAPI:
     marlin = runtime or MarlinRuntime()
     token = secrets.token_urlsafe(32)
@@ -68,7 +98,7 @@ def create_app(runtime: MarlinRuntime | None = None) -> FastAPI:
 
     @app.get("/assets/{name}")
     def asset(name: str) -> FileResponse:
-        if name not in {"app.js", "styles.css"}:
+        if name not in {"app.js", "styles.css", "marlin-mark.svg"}:
             raise HTTPException(status_code=404)
         return FileResponse(UI_DIR / name)
 
@@ -176,6 +206,118 @@ def create_app(runtime: MarlinRuntime | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail='Reminder not found.')
         marlin.events.publish('reminder.updated', reminder=result)
         return result
+
+    @app.post('/api/schedule/items')
+    def create_schedule_item(body: ScheduleTaskBody, x_marlin_token: str | None = Header(default=None)) -> dict[str, Any]:
+        require_token(x_marlin_token)
+        from datetime import datetime
+        deadline = datetime.fromisoformat(body.deadline_at) if body.deadline_at else None
+        return marlin.schedule.add_task(body.title, duration_minutes=body.duration_minutes, deadline=deadline, priority=body.priority)
+
+    @app.post('/api/schedule/plan')
+    def plan_schedule(body: SchedulePlanBody | None = None, x_marlin_token: str | None = Header(default=None)) -> dict[str, Any]:
+        require_token(x_marlin_token)
+        from datetime import datetime
+        day = datetime.fromisoformat(body.date) if body and body.date else None
+        return marlin.schedule.plan_day(day)
+
+    @app.post('/api/schedule/events')
+    def create_schedule_event(body: ScheduleEventBody, x_marlin_token: str | None = Header(default=None)) -> dict[str, Any]:
+        require_token(x_marlin_token)
+        from datetime import datetime
+        return marlin.schedule.add_event(body.title, datetime.fromisoformat(body.start_at), datetime.fromisoformat(body.end_at), recurrence=body.recurrence)
+
+    @app.get('/api/schedule/conflicts')
+    def schedule_conflicts(date: str | None = None, x_marlin_token: str | None = Header(default=None)) -> list[dict[str, Any]]:
+        require_token(x_marlin_token)
+        from datetime import datetime
+        return marlin.schedule.conflicts(datetime.fromisoformat(date) if date else None)
+
+    @app.get('/api/schedule/blocks/{block_id}/explanation')
+    def schedule_explanation(block_id: str, x_marlin_token: str | None = Header(default=None)) -> dict[str, Any]:
+        require_token(x_marlin_token)
+        result = marlin.schedule.explain_block(block_id)
+        if not result: raise HTTPException(status_code=404, detail='Schedule block not found.')
+        return result
+
+    @app.post('/api/schedule/plans/{plan_id}/apply')
+    def apply_schedule(plan_id: str, x_marlin_token: str | None = Header(default=None)) -> dict[str, Any]:
+        require_token(x_marlin_token)
+        result = marlin.schedule.apply_plan(plan_id)
+        if not result: raise HTTPException(status_code=409, detail='Plan is missing or no longer a preview.')
+        return result
+
+    @app.post('/api/schedule/plans/{plan_id}/discard')
+    def discard_schedule(plan_id: str, x_marlin_token: str | None = Header(default=None)) -> dict[str, Any]:
+        require_token(x_marlin_token)
+        with marlin.store.connect() as connection:
+            cursor = connection.execute("UPDATE schedule_plans SET status='discarded' WHERE id=? AND status='preview'", (plan_id,))
+        if not cursor.rowcount: raise HTTPException(status_code=409, detail='Plan is missing or no longer a preview.')
+        marlin.events.publish('schedule.plan.discarded', plan_id=plan_id)
+        return {'id': plan_id, 'status': 'discarded'}
+
+    @app.post('/api/schedule/items/{item_id}/complete')
+    def complete_schedule(item_id: str, x_marlin_token: str | None = Header(default=None)) -> dict[str, Any]:
+        require_token(x_marlin_token)
+        result = marlin.store.complete_schedule_item(item_id)
+        if not result: raise HTTPException(status_code=404, detail='Schedule item not found.')
+        return result
+
+    @app.get('/api/preferences')
+    def preferences(x_marlin_token: str | None = Header(default=None)) -> list[dict[str, Any]]:
+        require_token(x_marlin_token)
+        return marlin.store.list_preferences()
+
+    @app.delete('/api/preferences/{preference_id}')
+    def forget_preference(preference_id: str, x_marlin_token: str | None = Header(default=None)) -> dict[str, Any]:
+        require_token(x_marlin_token)
+        count = marlin.store.forget_preference(preference_id)
+        if not count: raise HTTPException(status_code=404, detail='Preference not found.')
+        marlin.events.publish('preference.forgotten', preference_id=preference_id)
+        return {'forgotten': count}
+
+    @app.post('/api/research')
+    def research(body: ResearchBody, x_marlin_token: str | None = Header(default=None)) -> dict[str, Any]:
+        require_token(x_marlin_token)
+        return marlin.research.search(body.query)
+
+    @app.post('/api/research/sources/{source_id}/save')
+    def save_source(source_id: str, body: SourceSaveBody | None = None, x_marlin_token: str | None = Header(default=None)) -> dict[str, Any]:
+        require_token(x_marlin_token)
+        result = marlin.store.save_research_source(source_id, body.note if body else '')
+        if not result: raise HTTPException(status_code=404, detail='Research source not found.')
+        return result
+
+    @app.get('/api/research/sources/{source_id}')
+    def source_details(source_id: str, x_marlin_token: str | None = Header(default=None)) -> dict[str, Any]:
+        require_token(x_marlin_token)
+        result = marlin.store.get_research_source(source_id)
+        if not result: raise HTTPException(status_code=404, detail='Research source not found.')
+        return result
+
+    @app.post('/api/files/analyze')
+    def analyze_file(body: FileAnalysisBody, x_marlin_token: str | None = Header(default=None)) -> dict[str, Any]:
+        require_token(x_marlin_token)
+        try: return marlin.files.analyze(body.query)
+        except (OSError, ValueError, PermissionError) as exc: raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post('/api/files/related')
+    def related_files(body: FileAnalysisBody, x_marlin_token: str | None = Header(default=None)) -> dict[str, Any]:
+        require_token(x_marlin_token)
+        try: return marlin.files.related_files(body.query)
+        except (OSError, ValueError, PermissionError) as exc: raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post('/api/files/change-impact')
+    def file_change_impact(body: FileAnalysisBody, x_marlin_token: str | None = Header(default=None)) -> dict[str, Any]:
+        require_token(x_marlin_token)
+        try: return marlin.files.change_impact(body.query)
+        except (OSError, ValueError, PermissionError) as exc: raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post('/api/files/explain-project')
+    def explain_project(body: FileAnalysisBody, x_marlin_token: str | None = Header(default=None)) -> dict[str, Any]:
+        require_token(x_marlin_token)
+        try: return marlin.files.explain_project(body.query)
+        except (OSError, ValueError, PermissionError) as exc: raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.websocket("/api/events")
     async def events(websocket: WebSocket) -> None:

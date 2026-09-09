@@ -25,6 +25,10 @@ class PrologEngine:
         self.prolog_dir = prolog_dir
         self._prolog = None
 
+    @property
+    def loaded(self) -> bool:
+        return self._prolog is not None
+
     @staticmethod
     def is_available() -> bool:
         if shutil.which("swipl") is None and shutil.which("swipl.exe") is None:
@@ -43,7 +47,9 @@ class PrologEngine:
         try:
             from pyswip import Prolog
         except Exception as exc:
-            raise PrologUnavailable("PySWIP is not installed or could not load SWI-Prolog.") from exc
+            raise PrologUnavailable(
+                f"PySWIP is installed but could not load SWI-Prolog: {exc}"
+            ) from exc
 
         reasoning_file = self.prolog_dir / "reasoning.pl"
         if not reasoning_file.exists():
@@ -99,6 +105,101 @@ class PrologEngine:
         return sorted(
             {str(row["Reason"]) for row in self._query(f"morning_priority_reason({task_atom}, Reason)")}
         )
+
+    def plan_day_slots(
+        self,
+        durations: list[int],
+        earliest: list[int],
+        latest: list[int],
+        busy: list[tuple[int, int]],
+    ) -> list[tuple[int, int]]:
+        if not durations:
+            return []
+        if not (len(durations) == len(earliest) == len(latest)) or len(durations) > 100:
+            raise ValueError("Schedule inputs must have matching lengths of at most 100.")
+        numbers = durations + earliest + latest + [value for pair in busy for value in pair]
+        if any(not isinstance(value, int) or value < 0 or value > 1440 for value in numbers):
+            raise ValueError("Schedule values must be integer minutes between 0 and 1440.")
+        busy_term = "[" + ",".join(f"busy({start},{end})" for start, end in busy) + "]"
+        query = (
+            f"schedule_tasks({durations},{earliest},{latest},{busy_term},Starts,Ends)"
+        )
+        rows = list(self._query(query))
+        if not rows:
+            return []
+        return [(int(start), int(end)) for start, end in zip(rows[0]["Starts"], rows[0]["Ends"])]
+
+    def intervals_conflict(self, first: tuple[int, int], second: tuple[int, int]) -> bool:
+        values = (*first, *second)
+        if any(not isinstance(value, int) or value < 0 or value > 1440 for value in values):
+            raise ValueError("Intervals must use integer minutes between 0 and 1440.")
+        return bool(list(self._query(f"interval_conflict({first[0]},{first[1]},{second[0]},{second[1]})")))
+
+    def dependency_order_valid(self, before: tuple[int, int], after_start: int) -> bool:
+        values = (*before, after_start)
+        if any(not isinstance(value, int) or value < 0 or value > 1440 for value in values):
+            raise ValueError("Dependency times must use integer minutes between 0 and 1440.")
+        duration = before[1] - before[0]
+        return bool(list(self._query(f"dependency_order({before[0]},{duration},{after_start})")))
+
+    def clear_agent_facts(self) -> None:
+        for predicate in (
+            "file_concept(_, _)", "file_import(_, _)", "file_project(_, _)",
+            "file_modified_days(_, _)", "preference_fact(_, _, _)",
+            "task_project(_, _)", "research_source(_, _, _, _)",
+            "research_claim(_, _, _)",
+        ):
+            list(self._query(f"retractall({predicate})"))
+
+    def assert_agent_fact(self, predicate: str, arguments: list[str | int]) -> None:
+        allowed = {
+            "file_concept", "file_import", "file_project", "file_modified_days",
+            "preference_fact", "task_project", "research_source",
+            "research_claim",
+        }
+        if predicate not in allowed:
+            raise ValueError(f"Unsupported agent fact: {predicate}")
+        encoded = []
+        for value in arguments:
+            encoded.append(str(value) if isinstance(value, int) else self._safe_atom(value))
+        self._assertz(f"{predicate}({','.join(encoded)})")
+
+    def related_file_reasons(self, file_id: str) -> list[tuple[str, str]]:
+        atom = self._safe_atom(file_id)
+        return sorted({
+            (str(row["Related"]), str(row["Reason"]))
+            for row in self._query(f"related_file({atom},Related,Reason)")
+        })
+
+    def file_change_impacts(self, file_id: str) -> list[tuple[str, str]]:
+        atom = self._safe_atom(file_id)
+        return sorted({
+            (str(row["Affected"]), str(row["Reason"]))
+            for row in self._query(f"file_change_impact({atom},Affected,Reason)")
+        })
+
+    def preference_influences(self, task_id: str) -> list[tuple[str, str]]:
+        atom = self._safe_atom(task_id)
+        return sorted({
+            (str(row["Category"]), str(row["Value"]))
+            for row in self._query(f"preference_influences({atom},Category,Value)")
+        })
+
+    def source_quality(self, source_id: str) -> int | None:
+        atom = self._safe_atom(source_id)
+        rows = list(self._query(f"source_quality({atom},Score)"))
+        return int(rows[0]["Score"]) if rows else None
+
+    def evidence_score(self, source_id: str) -> int | None:
+        atom = self._safe_atom(source_id)
+        rows = list(self._query(f"evidence_score({atom},Score)"))
+        return int(rows[0]["Score"]) if rows else None
+
+    def explain_web_evidence(self, source_id: str) -> dict[str, list[str]]:
+        atom = self._safe_atom(source_id)
+        supported = sorted({str(row["Claim"]) for row in self._query(f"corroborated_source({atom},_,Claim)")})
+        conflicts = sorted({str(row["Claim"]) for row in self._query(f"conflicting_source({atom},_,Claim)")})
+        return {"corroborated_claims": supported, "conflicting_claims": conflicts}
 
     def _clear_dynamic_facts(self) -> None:
         for predicate in [

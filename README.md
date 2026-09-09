@@ -48,6 +48,11 @@ Vosk and does not send microphone audio to an online service.
 - Alarms, reminders, snooze, standby/wake state, morning briefings, and media controls.
 - Typed file, folder, app, camera, and media actions.
 - Native Windows Camera launch, local video playback through the default player, and local graph explanations.
+- Prolog CLP(FD) day planning with deadlines, dependencies, working hours, fixed events, recurring events, conflict detection, and preview-before-apply.
+- Reversible preference memory: explicit preferences apply immediately; behavioural patterns require three observations; secrets and sensitive categories are rejected.
+- Incremental file understanding for source, text, Markdown, JSON, YAML, CSV, PDF, and DOCX files under Desktop, Documents, Downloads, and the project root.
+- Explicit keyless internet research with public-page limits, robots.txt checks, citations, and Prolog evidence ranking.
+- A Windows `MARLIN Reminder Runner` task, configured by setup, delivers due local reminders after the cockpit exits.
 
 Read/search/open/index/create actions run directly. Append, edit, overwrite,
 move, rename, delete, and close-app operations require a one-use confirmation.
@@ -73,7 +78,22 @@ play music
 hide MARLIN
 turn yourself off
 stand by
+I prefer coding in the morning
+schedule my Prolog report before Friday
+plan my day
+apply plan
+show schedule conflicts
+explain this project BrainOS
+which files are related to main.py
+what could be affected if I change main.py
+research SWI-Prolog CLP(FD) scheduling
+what do you remember about me
 ```
+
+The cockpit includes movable **Schedule**, **Memory**, **Research**, and
+**Prolog** panels. The Prolog panel shows the predefined predicate, selected
+facts, matched rules, result, and readable proof. SQLite remains the only
+persistent source of truth; Python validates all facts before invoking Prolog.
 
 ## Compatibility commands
 

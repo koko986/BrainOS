@@ -110,6 +110,19 @@ def test_high_priority_question_with_prolog_wording_never_calls_ollama(tmp_path,
     assert result["data"]["prolog_activity"]["matched_task_ids"]
 
 
+def test_priority_explanation_with_graph_in_task_id_reaches_prolog(tmp_path, monkeypatch):
+    runtime = make_runtime(tmp_path)
+    runtime.knowledge.seed_demo()
+    monkeypatch.setattr(runtime.model, "chat", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("model called")))
+
+    result = runtime.command("why high priority task_finish_graph_interface")
+
+    assert result["ok"]
+    assert "Finish graph interface is high priority because" in result["message"]
+    assert "soon deadline" in result["message"]
+    assert "graph_summary" not in result["data"]
+
+
 def test_local_model_error_is_clear_and_other_commands_still_work(tmp_path, monkeypatch):
     runtime = make_runtime(tmp_path)
     monkeypatch.setattr(runtime.model, "chat", lambda *args, **kwargs: (_ for _ in ()).throw(LocalModelUnavailable("Ollama is offline.")))
@@ -134,6 +147,19 @@ def test_backend_requires_token_and_handles_commands(tmp_path):
     )
     assert response.status_code == 200
     assert response.json()["client_action"] == "open_camera_native"
+
+
+def test_cockpit_serves_marlin_brand_mark(tmp_path):
+    runtime = make_runtime(tmp_path)
+    client = TestClient(create_app(runtime))
+    page = client.get("/")
+    mark = client.get("/assets/marlin-mark.svg")
+    assert page.status_code == 200
+    assert 'class="brand"' in page.text
+    assert '/assets/marlin-mark.svg' in page.text
+    assert mark.status_code == 200
+    assert "MARLIN circuit mark" in mark.text
+    runtime.shutdown()
 
 
 def test_site_command_bypasses_model_and_opens_directly(tmp_path, monkeypatch):

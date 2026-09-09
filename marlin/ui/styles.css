@@ -11,7 +11,9 @@ body { background: #05080b; }
 #cockpit { position: relative; isolation: isolate; }
 #brain { position: absolute; inset: 0; width: 100%; height: 100%; background: #05080b; cursor: grab; }
 #brain:active { cursor: grabbing; }
-.brand { position: fixed; top: 22px; left: 24px; z-index: 3; font-size: 22px; font-weight: 750; pointer-events: none; }
+.brand { position: fixed; top: 18px; left: 20px; z-index: 3; display: flex; align-items: center; gap: 9px; pointer-events: none; }
+.brand img { width: 38px; height: 38px; filter: drop-shadow(0 0 8px rgba(92,216,202,.18)); }
+.brand strong { display: block; font-size: 20px; line-height: 1; font-weight: 750; }
 .brand span { display: block; margin-top: 4px; color: #a9b8b4; font-size: 10px; font-weight: 500; }
 .panel { position: fixed; z-index: 5; background: rgba(7, 13, 18, .88); border: 1px solid rgba(78, 111, 131, .66); border-radius: 7px; backdrop-filter: blur(12px); box-shadow: 0 12px 34px rgba(0,0,0,.32); }
 .panel header { padding: 9px 11px; color: #92aabe; font-size: 11px; font-weight: 750; border-bottom: 1px solid rgba(78,111,131,.35); cursor: move; }
@@ -74,10 +76,26 @@ button.primary, button.run { background: #183e48; border-color: #43a99d; }
 .reminder-controls { display: flex; gap: 8px; margin-top: 8px; }
 .reminder-controls button { width: 32px; height: 32px; padding: 0; }
 #routinePanel footer { font-size: 10px; padding: 8px 10px; color: #9aabb4; }
-.panel-switches { position: fixed; top: 22px; right: 24px; z-index: 9; display: flex; gap: 8px; }
-.panel-switches button { background: #171c1c; border-color: #394542; font-size: 12px; }
+.panel-switches { position: fixed; top: 22px; left: 150px; right: 18px; z-index: 9; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.panel-switches button { background: #171c1c; border-color: #394542; font-size: 11px; padding-inline: 9px; }
 #statusPanel, #routinePanel { visibility: hidden; top: 76px; }
 #statusPanel.revealed, #routinePanel.revealed { visibility: visible; }
+.agent-panel { visibility: hidden; top: 76px; left: 50%; width: min(310px, calc(100vw - 24px)); max-height: 58vh; overflow: hidden; }
+.agent-panel.wide { width: min(430px, calc(100vw - 24px)); }
+.agent-panel.revealed { visibility: visible; }
+#schedulePanel { transform: translateX(-106%); }
+#memoryPanel { transform: translateX(6%); }
+#researchPanel { left: auto; right: 18px; top: 124px; }
+#prologPanel { left: 18px; top: 124px; }
+.panel-content { padding: 10px; max-height: 52vh; overflow: auto; color: #bdccd7; font-size: 12px; line-height: 1.45; }
+.agent-row { padding: 8px 0; border-bottom: 1px solid rgba(78,111,131,.3); }
+.agent-row:last-child { border-bottom: 0; }
+.agent-row strong { display: block; color: #eef6fa; }
+.agent-row small { color: #8fa3af; }
+.agent-actions { display: flex; gap: 6px; margin-top: 9px; }
+.source-link { color: #71d3c2; text-decoration: none; }
+.source-link:hover { text-decoration: underline; }
+.proof { white-space: pre-wrap; overflow-wrap: anywhere; color: #a9c7bc; font-family: Consolas, monospace; font-size: 11px; }
 .command-dock { width: min(390px, calc(100vw - 24px)); bottom: 24px; }
 .voice-controls button { min-height: 32px; padding: 6px 9px; font-size: 11px; background: #161d1c; border-color: #394842; }
 #talkNow { color: #0c1913; background: #b0e4c0; border-color: #b0e4c0; font-weight: 650; }
@@ -102,7 +120,8 @@ button.run { background: #d6e9df; color: #14251b; border-color: transparent; fon
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 @media (max-width: 760px) {
   #routinePanel { width: min(210px, calc(100vw - 24px)); }
-  .brand { top: 10px; left: 12px; }
+  .brand { top: 9px; left: 10px; gap: 6px; }
+  .brand img { width: 30px; height: 30px; }
   .compact { width: 170px; }
   #statusPanel { top: 40px; left: 10px; }
   #statusPanel { width: 140px; }
@@ -113,7 +132,9 @@ button.run { background: #d6e9df; color: #14251b; border-color: transparent; fon
   .command-dock { bottom: 12px; width: min(380px, calc(100vw - 18px)); }
   #graphLegend { display: none; }
   .voice-monitor { grid-template-columns: auto 55px 90px; }
-  .panel-switches { top: 12px; right: 12px; }
-  .brand { font-size: 18px; }
+  .panel-switches { top: 12px; left: 112px; right: 12px; }
+  .panel-switches { max-width: 72vw; flex-wrap: wrap; justify-content: flex-end; }
+  .agent-panel, #schedulePanel, #memoryPanel { left: 12px; right: 12px; top: 84px; width: auto; transform: none; }
+  .brand strong { font-size: 16px; }
   .brand span { font-size: 8px; }
 }

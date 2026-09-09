@@ -1,4 +1,5 @@
 import pytest
+from types import SimpleNamespace
 from marlin.browser_media import YouTubePlayer
 
 from marlin.config import MarlinSettings
@@ -10,6 +11,28 @@ def test_youtube_bot_gate_is_reported_not_bypassed():
     assert YouTubePlayer.access_message('Normal video title') is None
 
 
+def test_youtube_recovers_from_chrome_replacing_its_startup_tab():
+    detached = SimpleNamespace(url='about:blank', is_closed=lambda: True)
+    youtube = SimpleNamespace(url='https://www.youtube.com/results?search_query=music', is_closed=lambda: False)
+    context = SimpleNamespace(pages=[detached, youtube], new_page=lambda: pytest.fail('existing YouTube page should be reused'))
+
+    assert YouTubePlayer._recoverable_navigation_error(Exception('net::ERR_ABORTED; maybe frame was detached'))
+    assert YouTubePlayer._replacement_page(context, detached) is youtube
+
+
+def test_youtube_desktop_fallback_only_accepts_youtube_urls(tmp_path, monkeypatch):
+    executable = tmp_path / 'YouTube Desktop' / 'ytdesktop.exe'
+    executable.parent.mkdir()
+    executable.write_bytes(b'app')
+    launched = []
+    monkeypatch.setenv('LOCALAPPDATA', str(tmp_path))
+    monkeypatch.setattr('marlin.browser_media.subprocess.Popen', lambda args, **kwargs: launched.append((args, kwargs)))
+
+    assert not YouTubePlayer._open_desktop_player('https://example.com/watch?v=no')
+    assert YouTubePlayer._open_desktop_player('https://www.youtube.com/watch?v=music')
+    assert launched[0][0] == [str(executable), 'https://www.youtube.com/watch?v=music&autoplay=1']
+
+
 def test_empty_music_request_is_rejected(tmp_path):
     with pytest.raises(ValueError):
         YouTubePlayer(tmp_path).play('')
@@ -17,6 +40,8 @@ def test_empty_music_request_is_rejected(tmp_path):
 
 @pytest.mark.parametrize('text,query', [
     ('open youtube and play some music', 'relaxing music'),
+    ('open desktop youtube and play some music', 'relaxing music'),
+    ('open YouTube Desktop and play study music', 'study music'),
     ('Open YouTube, and play jazz', 'jazz'),
     ('play piano music on youtube', 'piano music'),
     ('play music', 'relaxing music'),

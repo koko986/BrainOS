@@ -323,13 +323,59 @@ document.getElementById('talkNow').addEventListener('click', async event => {
   } catch (error) { feedback(error.message, true); }
   finally { busy(button, false); }
 });
-for (const [buttonId, panelId] of [['toggleStatus', 'statusPanel'], ['toggleRoutine', 'routinePanel']]) {
+for (const [buttonId, panelId] of [['toggleStatus', 'statusPanel'], ['toggleRoutine', 'routinePanel'], ['toggleSchedule', 'schedulePanel'], ['toggleMemory', 'memoryPanel'], ['toggleResearch', 'researchPanel'], ['toggleProlog', 'prologPanel']]) {
   const button = document.getElementById(buttonId);
   const panel = document.getElementById(panelId);
   button.addEventListener('click', () => {
     const open = panel.classList.toggle('revealed');
     button.setAttribute('aria-expanded', String(open));
   });
+}
+
+function row(title, detail = '', small = '') {
+  const item = document.createElement('div'); item.className = 'agent-row';
+  const heading = document.createElement('strong'); heading.textContent = title; item.append(heading);
+  if (detail) { const body = document.createElement('div'); body.textContent = detail; item.append(body); }
+  if (small) { const note = document.createElement('small'); note.textContent = small; item.append(note); }
+  return item;
+}
+
+function renderAgentPanels(state) {
+  const schedule = document.getElementById('scheduleContent'); schedule.replaceChildren();
+  const plan = state.schedule_plan;
+  const plannedIds = new Set((plan?.blocks || []).map(block => block.item_id));
+  for (const block of plan?.blocks || []) schedule.append(row(block.title, `${new Date(block.start_at).toLocaleString()} – ${new Date(block.end_at).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}`, block.status));
+  for (const item of state.schedule_items || []) {
+    if (plannedIds.has(item.id)) continue;
+    const timing = item.start_at ? `${new Date(item.start_at).toLocaleString()} – ${new Date(item.end_at).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}` : item.deadline_at ? `Due ${new Date(item.deadline_at).toLocaleString()}` : `${item.duration_minutes} minutes · awaiting day plan`;
+    schedule.append(row(item.title, timing, `${item.kind} · ${item.status}${item.recurrence !== 'none' ? ` · ${item.recurrence}` : ''}`));
+  }
+  if (plan?.status === 'preview') {
+    const actions = document.createElement('div'); actions.className = 'agent-actions';
+    for (const [label, action] of [['Apply', 'apply'], ['Discard', 'discard']]) { const button = document.createElement('button'); button.textContent = label; button.onclick = async () => { await api(`/api/schedule/plans/${plan.id}/${action}`, {method:'POST'}); await refreshState(); }; actions.append(button); }
+    schedule.append(actions);
+  }
+  if (!schedule.children.length) schedule.textContent = 'No schedule yet. Ask MARLIN to plan your day.';
+
+  const memory = document.getElementById('memoryContent'); memory.replaceChildren();
+  for (const preference of state.preferences || []) {
+    const item = row(preference.value, preference.category.replaceAll('_', ' '), `${Math.round(preference.confidence * 100)}% · ${preference.active ? 'active' : `${preference.observations}/3 observations`}`);
+    if (preference.active) { const forget = document.createElement('button'); forget.textContent = 'Forget'; forget.onclick = async () => { await api(`/api/preferences/${preference.id}`, {method:'DELETE'}); await refreshState(); }; item.append(forget); }
+    memory.append(item);
+  }
+  if (!memory.children.length) memory.textContent = 'No learned preferences.';
+
+  const research = document.getElementById('researchContent'); research.replaceChildren();
+  for (const run of state.research || []) {
+    research.append(row(run.query, run.summary || '', new Date(run.created_at).toLocaleString()));
+    for (const source of run.sources || []) { const item = document.createElement('div'); item.className = 'agent-row'; const link = document.createElement('a'); link.className = 'source-link'; link.href = source.url; link.target = '_blank'; link.rel = 'noopener'; link.textContent = `[${source.rank}] ${source.title}`; const score = document.createElement('small'); score.textContent = ` ${source.domain}${source.prolog_score == null ? '' : ` · Prolog ${source.prolog_score}`}`; item.append(link, score); research.append(item); }
+  }
+  if (!research.children.length) research.textContent = 'No research yet. Use “Research …”.';
+
+  const prolog = document.getElementById('prologContent'); prolog.replaceChildren();
+  const activity = state.prolog_activity || {};
+  if (activity.predicate) { prolog.append(row(activity.predicate, `Relevant facts: ${activity.facts ?? 0}`, (activity.rules || []).join(', '))); const proof = document.createElement('pre'); proof.className = 'proof'; proof.textContent = JSON.stringify(activity.proof || activity.result, null, 2); prolog.append(proof); }
+  else prolog.textContent = 'No predicate invoked yet.';
 }
 document.getElementById('listen').addEventListener('click', async event => {
   const button = event.currentTarget;
@@ -368,21 +414,18 @@ document.getElementById('voiceChat').addEventListener('click', async event => {
 
 async function openCamera() {
   const panel = document.getElementById('cameraPanel');
-  const button = document.getElementById('openCamera');
   if (cameraStream) { feedback('Camera is already open'); return; }
-  busy(button, true); feedback('Opening camera...');
-  try { cameraStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false }); document.getElementById('cameraVideo').srcObject = cameraStream; panel.classList.add('active'); button.setAttribute('aria-pressed', 'true'); feedback('Camera opened'); }
+  feedback('Opening camera...');
+  try { cameraStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false }); document.getElementById('cameraVideo').srcObject = cameraStream; panel.classList.add('active'); feedback('Camera opened'); }
   catch (error) { feedback(`Camera unavailable: ${error.message}`, true); }
-  finally { busy(button, false); }
 }
-function closeCamera() { cameraStream?.getTracks().forEach(track => track.stop()); cameraStream = null; document.getElementById('cameraPanel').classList.remove('active'); document.getElementById('openCamera').setAttribute('aria-pressed', 'false'); feedback('Camera closed'); }
+function closeCamera() { cameraStream?.getTracks().forEach(track => track.stop()); cameraStream = null; document.getElementById('cameraPanel').classList.remove('active'); feedback('Camera closed'); }
 async function handleClientAction(action) {
   if (action === 'open_camera') await openCamera();
   if (action === 'close_camera') closeCamera();
   if (action === 'open_camera_native') feedback('Windows Camera opened');
   if (action === 'close_camera_native') { closeCamera(); feedback('Windows Camera closed'); }
 }
-document.getElementById('openCamera').addEventListener('click', () => submitCommand('open camera'));
 document.getElementById('closeCamera').addEventListener('click', closeCamera);
 
 function renderRoutine(state) {
@@ -435,6 +478,7 @@ async function refreshState() {
     ['index', state.index_progress?.indexed ? `${state.index_progress.indexed} files` : state.index], ['brain', `${state.entities} nodes · ${state.relationships} links`]
   ].map(([key, value]) => `<div class="status-row"><strong>${key}</strong><span class="state-${state.state}">${value}</span></div>`).join('');
   renderRoutine(state);
+  renderAgentPanels(state);
   const voiceState = document.getElementById('voiceState');
   if (state.voice.wake_word && !state.voice_chat) voiceState.textContent = state.voice.wake_status === 'ready' ? 'Say “Hey MARLIN”' : `Wake: ${state.voice.wake_status}`;
   const select = document.getElementById('microphone');
@@ -518,8 +562,22 @@ function connectEvents() {
       document.getElementById('routinePanel').classList.add('revealed');
       document.getElementById('toggleRoutine').setAttribute('aria-expanded', 'true');
     }
+    if (packet.type === 'alarm.created') {
+      document.getElementById('routinePanel').classList.add('revealed');
+      document.getElementById('toggleRoutine').setAttribute('aria-expanded', 'true');
+    }
+    if (packet.type === 'schedule.item.created' || packet.type === 'schedule.plan.preview' || packet.type === 'schedule.plan.applied') {
+      document.getElementById('schedulePanel').classList.add('revealed');
+      document.getElementById('toggleSchedule').setAttribute('aria-expanded', 'true');
+    }
+    if (packet.type === 'research.completed') {
+      document.getElementById('researchPanel').classList.add('revealed');
+      document.getElementById('toggleResearch').setAttribute('aria-expanded', 'true');
+      feedback('Internet research complete');
+    }
     if (packet.type === 'reminder.fired') { highlightedReminder = packet.data.reminder.id; addMessage(`Reminder: ${packet.data.reminder.text}`); feedback(`Reminder: ${packet.data.reminder.text}`); }
-    if (['assistant.state','voice.state','wake.detected','wake.result','index.progress','alarm.created','alarm.fired','reminder.created','reminder.updated','reminder.fired'].includes(packet.type)) refreshState();
+    if (packet.type === 'routine.retrying') feedback('Reminder service is retrying after a database delay', true);
+    if (['assistant.state','voice.state','wake.detected','wake.result','index.progress','alarm.created','alarm.fired','reminder.created','reminder.updated','reminder.fired','schedule.item.created','schedule.plan.preview','schedule.plan.applied','schedule.plan.discarded','preference.learned','preference.observed','preference.forgotten','research.completed','prolog.result'].includes(packet.type)) refreshState();
     if (packet.type === 'alarm.fired') addMessage(`${packet.data.alarm.label}. Would you like five more minutes?`);
   };
   socket.onclose = () => setTimeout(connectEvents, 1200);

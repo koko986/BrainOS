@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 5
 
 V2_SCHEMA = """
 CREATE TABLE IF NOT EXISTS marlin_meta (
@@ -83,11 +83,93 @@ CREATE TABLE IF NOT EXISTS file_search (
     snippet TEXT NOT NULL DEFAULT '',
     modified_at TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS schedule_items (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'task',
+    start_at TEXT,
+    end_at TEXT,
+    duration_minutes INTEGER NOT NULL DEFAULT 60,
+    deadline_at TEXT,
+    fixed INTEGER NOT NULL DEFAULT 0,
+    recurrence TEXT NOT NULL DEFAULT 'none',
+    priority INTEGER NOT NULL DEFAULT 50,
+    status TEXT NOT NULL DEFAULT 'pending',
+    project_id TEXT,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS schedule_plans (
+    id TEXT PRIMARY KEY,
+    plan_date TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'preview',
+    explanation_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    applied_at TEXT
+);
+CREATE TABLE IF NOT EXISTS schedule_blocks (
+    id TEXT PRIMARY KEY,
+    plan_id TEXT NOT NULL,
+    item_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    start_at TEXT NOT NULL,
+    end_at TEXT NOT NULL,
+    explanation_json TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'preview',
+    FOREIGN KEY(plan_id) REFERENCES schedule_plans(id) ON DELETE CASCADE,
+    FOREIGN KEY(item_id) REFERENCES schedule_items(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS preferences (
+    id TEXT PRIMARY KEY,
+    category TEXT NOT NULL,
+    value TEXT NOT NULL,
+    confidence REAL NOT NULL,
+    evidence TEXT NOT NULL,
+    observations INTEGER NOT NULL DEFAULT 1,
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(category, value)
+);
+CREATE TABLE IF NOT EXISTS research_runs (
+    id TEXT PRIMARY KEY,
+    query TEXT NOT NULL,
+    summary TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS research_sources (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    rank INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    url TEXT NOT NULL,
+    domain TEXT NOT NULL,
+    snippet TEXT NOT NULL DEFAULT '',
+    note TEXT NOT NULL DEFAULT '',
+    accessed_at TEXT NOT NULL,
+    saved INTEGER NOT NULL DEFAULT 0,
+    prolog_score INTEGER,
+    FOREIGN KEY(run_id) REFERENCES research_runs(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS file_insights (
+    entity_id TEXT PRIMARY KEY,
+    checksum TEXT NOT NULL,
+    summary TEXT NOT NULL DEFAULT '',
+    concepts_json TEXT NOT NULL DEFAULT '[]',
+    imports_json TEXT NOT NULL DEFAULT '[]',
+    technologies_json TEXT NOT NULL DEFAULT '[]',
+    analyzed_at TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, id);
 CREATE INDEX IF NOT EXISTS idx_alarms_due ON alarms(enabled, due_at);
 CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(completed, due_at);
 CREATE INDEX IF NOT EXISTS idx_context_kind ON recent_context(kind, id DESC);
 CREATE INDEX IF NOT EXISTS idx_actions_created ON action_history(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_schedule_items_due ON schedule_items(status, deadline_at);
+CREATE INDEX IF NOT EXISTS idx_schedule_blocks_time ON schedule_blocks(start_at, end_at);
+CREATE INDEX IF NOT EXISTS idx_preferences_active ON preferences(active, category);
+CREATE INDEX IF NOT EXISTS idx_research_sources_run ON research_sources(run_id, rank);
 """
 
 
@@ -126,6 +208,9 @@ class MarlinStore:
             columns = {row['name'] for row in connection.execute('PRAGMA table_info(reminders)')}
             if 'notified_at' not in columns:
                 connection.execute('ALTER TABLE reminders ADD COLUMN notified_at TEXT')
+            research_columns = {row['name'] for row in connection.execute('PRAGMA table_info(research_sources)')}
+            if 'prolog_score' not in research_columns:
+                connection.execute('ALTER TABLE research_sources ADD COLUMN prolog_score INTEGER')
             connection.execute(
                 "INSERT OR REPLACE INTO marlin_meta(key, value) VALUES('schema_version', ?)",
                 (str(SCHEMA_VERSION),),
@@ -339,6 +424,15 @@ class MarlinStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def claim_due_alarms(self) -> list[dict[str, Any]]:
+        stamp = now_iso()
+        with self.connect() as connection:
+            rows = connection.execute(
+                "UPDATE alarms SET enabled=0,fired_at=? WHERE enabled=1 AND due_at<=? RETURNING *",
+                (stamp, stamp),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def mark_alarm_fired(self, alarm_id: str) -> None:
         with self.connect() as connection:
             connection.execute(
@@ -417,3 +511,264 @@ class MarlinStore:
         with self.connect() as connection:
             rows = connection.execute("SELECT * FROM action_history ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
         return [dict(row) for row in rows]
+
+    def add_schedule_item(
+        self,
+        title: str,
+        *,
+        kind: str = "task",
+        start_at: str | None = None,
+        end_at: str | None = None,
+        duration_minutes: int = 60,
+        deadline_at: str | None = None,
+        fixed: bool = False,
+        recurrence: str = "none",
+        priority: int = 50,
+        project_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        item_id, stamp = uuid.uuid4().hex, now_iso()
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT INTO schedule_items
+                   (id,title,kind,start_at,end_at,duration_minutes,deadline_at,fixed,recurrence,priority,status,project_id,metadata_json,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,'pending',?,?,?,?)""",
+                (item_id, title, kind, start_at, end_at, max(30, duration_minutes), deadline_at,
+                 int(fixed), recurrence, max(0, min(100, priority)), project_id,
+                 json.dumps(metadata or {}, ensure_ascii=False), stamp, stamp),
+            )
+        return self.get_schedule_item(item_id) or {}
+
+    def get_schedule_item(self, item_id: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute("SELECT * FROM schedule_items WHERE id=?", (item_id,)).fetchone()
+        return self._json_row(row, "metadata_json", "metadata") if row else None
+
+    def list_schedule_items(self, *, include_completed: bool = False) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM schedule_items"
+        args: tuple[Any, ...] = ()
+        if not include_completed:
+            sql += " WHERE status <> ?"
+            args = ("completed",)
+        sql += " ORDER BY start_at IS NULL, start_at, deadline_at IS NULL, deadline_at, priority DESC"
+        with self.connect() as connection:
+            rows = connection.execute(sql, args).fetchall()
+        return [self._json_row(row, "metadata_json", "metadata") for row in rows]
+
+    def complete_schedule_item(self, item_id: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "UPDATE schedule_items SET status='completed',updated_at=? WHERE id=?",
+                (now_iso(), item_id),
+            )
+            if not cursor.rowcount:
+                return None
+        return self.get_schedule_item(item_id)
+
+    def create_schedule_plan(
+        self,
+        plan_date: str,
+        blocks: list[dict[str, Any]],
+        explanation: dict[str, Any],
+    ) -> dict[str, Any]:
+        plan_id, stamp = uuid.uuid4().hex, now_iso()
+        with self.connect() as connection:
+            connection.execute(
+                "INSERT INTO schedule_plans(id,plan_date,status,explanation_json,created_at) VALUES(?,?,'preview',?,?)",
+                (plan_id, plan_date, json.dumps(explanation, ensure_ascii=False), stamp),
+            )
+            for block in blocks:
+                connection.execute(
+                    """INSERT INTO schedule_blocks
+                       (id,plan_id,item_id,title,start_at,end_at,explanation_json,status)
+                       VALUES(?,?,?,?,?,?,?,'preview')""",
+                    (uuid.uuid4().hex, plan_id, block["item_id"], block["title"], block["start_at"],
+                     block["end_at"], json.dumps(block.get("explanation", {}), ensure_ascii=False)),
+                )
+        return self.get_schedule_plan(plan_id) or {}
+
+    def get_schedule_plan(self, plan_id: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            plan = connection.execute("SELECT * FROM schedule_plans WHERE id=?", (plan_id,)).fetchone()
+            if not plan:
+                return None
+            blocks = connection.execute(
+                "SELECT * FROM schedule_blocks WHERE plan_id=? ORDER BY start_at", (plan_id,)
+            ).fetchall()
+        result = self._json_row(plan, "explanation_json", "explanation")
+        result["blocks"] = [self._json_row(row, "explanation_json", "explanation") for row in blocks]
+        return result
+
+    def latest_schedule_plan(self, *, status: str | None = None) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            if status:
+                row = connection.execute(
+                    "SELECT id FROM schedule_plans WHERE status=? ORDER BY created_at DESC LIMIT 1", (status,)
+                ).fetchone()
+            else:
+                row = connection.execute("SELECT id FROM schedule_plans ORDER BY created_at DESC LIMIT 1").fetchone()
+        return self.get_schedule_plan(str(row["id"])) if row else None
+
+    def apply_schedule_plan(self, plan_id: str) -> dict[str, Any] | None:
+        stamp = now_iso()
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "UPDATE schedule_plans SET status='applied',applied_at=? WHERE id=? AND status='preview'",
+                (stamp, plan_id),
+            )
+            if not cursor.rowcount:
+                return None
+            connection.execute("UPDATE schedule_blocks SET status='applied' WHERE plan_id=?", (plan_id,))
+        return self.get_schedule_plan(plan_id)
+
+    def schedule_blocks_for_date(self, date_prefix: str, *, applied_only: bool = True) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM schedule_blocks WHERE start_at LIKE ?"
+        args: list[Any] = [f"{date_prefix}%"]
+        if applied_only:
+            sql += " AND status='applied'"
+        sql += " ORDER BY start_at"
+        with self.connect() as connection:
+            rows = connection.execute(sql, args).fetchall()
+        return [self._json_row(row, "explanation_json", "explanation") for row in rows]
+
+    def remember_preference(self, category: str, value: str, evidence: str, confidence: float) -> dict[str, Any]:
+        stamp = now_iso()
+        with self.connect() as connection:
+            existing = connection.execute(
+                "SELECT * FROM preferences WHERE category=? AND lower(value)=lower(?)", (category, value)
+            ).fetchone()
+            if existing:
+                observations = int(existing["observations"]) + 1
+                active = int(confidence >= .9 or observations >= 3)
+                connection.execute(
+                    """UPDATE preferences SET confidence=max(confidence,?),evidence=?,observations=?,active=?,updated_at=?
+                       WHERE id=?""",
+                    (confidence, evidence[:500], observations, active, stamp, existing["id"]),
+                )
+                preference_id = str(existing["id"])
+            else:
+                preference_id = uuid.uuid4().hex
+                connection.execute(
+                    """INSERT INTO preferences(id,category,value,confidence,evidence,observations,active,created_at,updated_at)
+                       VALUES(?,?,?,?,?,1,?,?,?)""",
+                    (preference_id, category, value, confidence, evidence[:500], int(confidence >= .9), stamp, stamp),
+                )
+        return self.get_preference(preference_id) or {}
+
+    def get_preference(self, preference_id: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute("SELECT * FROM preferences WHERE id=?", (preference_id,)).fetchone()
+        return dict(row) if row else None
+
+    def list_preferences(self, *, active_only: bool = False) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM preferences" + (" WHERE active=1" if active_only else "") + " ORDER BY active DESC,updated_at DESC"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def forget_preference(self, query: str) -> int:
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "UPDATE preferences SET active=0,updated_at=? WHERE id=? OR lower(value) LIKE lower(?)",
+                (now_iso(), query, f"%{query}%"),
+            )
+        return cursor.rowcount
+
+    def add_research(self, query: str, sources: list[dict[str, Any]], summary: str = "") -> dict[str, Any]:
+        run_id, stamp = uuid.uuid4().hex, now_iso()
+        with self.connect() as connection:
+            connection.execute(
+                "INSERT INTO research_runs(id,query,summary,created_at) VALUES(?,?,?,?)",
+                (run_id, query, summary[:4000], stamp),
+            )
+            for rank, source in enumerate(sources, 1):
+                connection.execute(
+                    """INSERT INTO research_sources(id,run_id,rank,title,url,domain,snippet,note,accessed_at,saved)
+                       VALUES(?,?,?,?,?,?,?,?,?,0)""",
+                    (uuid.uuid4().hex, run_id, rank, source.get("title", "Untitled")[:500],
+                     source.get("url", "")[:2000], source.get("domain", "")[:255],
+                     source.get("snippet", "")[:2000], source.get("note", "")[:1000], stamp),
+                )
+        return self.get_research(run_id) or {}
+
+    def get_research(self, run_id: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            run = connection.execute("SELECT * FROM research_runs WHERE id=?", (run_id,)).fetchone()
+            if not run:
+                return None
+            sources = connection.execute(
+                "SELECT * FROM research_sources WHERE run_id=? ORDER BY rank", (run_id,)
+            ).fetchall()
+        result = dict(run)
+        result["sources"] = [dict(row) for row in sources]
+        return result
+
+    def recent_research(self, limit: int = 5) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute("SELECT id FROM research_runs ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+        return [item for row in rows if (item := self.get_research(str(row["id"]))) is not None]
+
+    def save_research_source(self, source_id: str, note: str = "") -> dict[str, Any] | None:
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "UPDATE research_sources SET saved=1,note=CASE WHEN ?='' THEN note ELSE ? END WHERE id=?",
+                (note, note[:1000], source_id),
+            )
+            if not cursor.rowcount:
+                return None
+            row = connection.execute("SELECT * FROM research_sources WHERE id=?", (source_id,)).fetchone()
+        return dict(row) if row else None
+
+    def get_research_source(self, source_id: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute("SELECT * FROM research_sources WHERE id=?", (source_id,)).fetchone()
+        return dict(row) if row else None
+
+    def set_research_source_score(self, source_id: str, score: int) -> None:
+        with self.connect() as connection:
+            connection.execute("UPDATE research_sources SET prolog_score=? WHERE id=?", (score, source_id))
+
+    def upsert_file_insight(
+        self,
+        entity_id: str,
+        checksum: str,
+        summary: str,
+        concepts: list[str],
+        imports: list[str],
+        technologies: list[str],
+    ) -> dict[str, Any]:
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT OR REPLACE INTO file_insights
+                   (entity_id,checksum,summary,concepts_json,imports_json,technologies_json,analyzed_at)
+                   VALUES(?,?,?,?,?,?,?)""",
+                (entity_id, checksum, summary[:2000], json.dumps(concepts[:40]), json.dumps(imports[:80]),
+                 json.dumps(technologies[:30]), now_iso()),
+            )
+            row = connection.execute("SELECT * FROM file_insights WHERE entity_id=?", (entity_id,)).fetchone()
+        return self._insight_row(row)
+
+    def get_file_insight(self, entity_id: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute("SELECT * FROM file_insights WHERE entity_id=?", (entity_id,)).fetchone()
+        return self._insight_row(row) if row else None
+
+    @staticmethod
+    def _json_row(row: sqlite3.Row, source_key: str, target_key: str) -> dict[str, Any]:
+        item = dict(row)
+        try:
+            item[target_key] = json.loads(item.pop(source_key) or "{}")
+        except json.JSONDecodeError:
+            item[target_key] = {}
+        return item
+
+    @staticmethod
+    def _insight_row(row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row)
+        for source, target in (("concepts_json", "concepts"), ("imports_json", "imports"), ("technologies_json", "technologies")):
+            try:
+                item[target] = json.loads(item.pop(source) or "[]")
+            except json.JSONDecodeError:
+                item[target] = []
+        return item

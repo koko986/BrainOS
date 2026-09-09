@@ -33,6 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
     setup = sub.add_parser("setup", help="Install local dependencies and download models.")
     setup.add_argument("--launch-on-login", action="store_true", help="Start MARLIN voice mode at Windows login.")
     sub.add_parser("doctor", help="Check every local MARLIN subsystem.")
+    sub.add_parser("scheduler-tick", help=argparse.SUPPRESS)
     ask = sub.add_parser("ask", help="Run one MARLIN command.")
     ask.add_argument("text")
     sub.add_parser("seed-demo")
@@ -60,6 +61,9 @@ def main(argv: list[str] | None = None) -> int:
         return run_setup(settings)
     if command == "doctor":
         return run_doctor(settings)
+    if command == "scheduler-tick":
+        from marlin.scheduler_runner import run_once
+        return run_once(settings)
     if command == 'desktop':
         from marlin.desktop import launch
         return launch(settings)
@@ -201,6 +205,10 @@ def run_setup(settings: MarlinSettings) -> int:
     if settings.launch_on_login:
         startup = _configure_launch_on_login()
         print(f"Windows login launch configured: {startup}")
+    from marlin.scheduler_runner import register_runner
+    runner_ok, runner_detail = register_runner()
+    print(f"Windows reminder runner: {'configured' if runner_ok else 'not configured'} ({runner_detail})")
+    setup_ok = setup_ok and runner_ok
     print("MARLIN V2 local setup is complete." if setup_ok else "MARLIN V2 setup is partial; see the failed checks above.")
     doctor_result = run_doctor(settings)
     return doctor_result if setup_ok else 2
@@ -218,6 +226,12 @@ def run_doctor(settings: MarlinSettings) -> int:
     checks.append(("Desktop wrapper", importlib.util.find_spec("webview") is not None, "pywebview"))
     checks.append(("NVIDIA GPU tools", bool(shutil.which("nvidia-smi")), shutil.which("nvidia-smi") or "not detected"))
     try:
+        from marlin.scheduler_runner import runner_status
+        runner_ok, runner_detail = runner_status()
+        checks.append(("Reminder runner", runner_ok, runner_detail or "not registered"))
+    except Exception as exc:
+        checks.append(("Reminder runner", False, str(exc)))
+    try:
         import sounddevice as sd
         microphone = sd.query_devices(kind="input")
         checks.append(("Microphone", bool(microphone), str(microphone.get("name", "available"))))
@@ -228,15 +242,28 @@ def run_doctor(settings: MarlinSettings) -> int:
         model = runtime.model.health()
         checks.append(("Ollama service", bool(model.get("available")), str(model.get("error") or settings.ollama_url)))
         checks.append(("Qwen local model", bool(model.get("loaded")), settings.ollama_model))
+        try:
+            runtime.reasoning.engine.load()
+            bridge_result = list(runtime.reasoning.engine._query("X is 1 + 1"))
+            bridge_ok = bool(bridge_result and int(bridge_result[0]["X"]) == 2)
+            bridge_detail = "PySWIP loaded reasoning.pl and SWI-Prolog returned X = 2"
+        except Exception as exc:
+            bridge_ok = False
+            bridge_detail = str(exc)
+        checks.append(("Prolog Python bridge", bridge_ok, bridge_detail))
         with runtime.store.connect() as connection:
             fts = connection.execute("SELECT name FROM sqlite_master WHERE name='file_search_fts'").fetchone()
         checks.append(("SQLite brain + FTS", bool(fts), str(settings.database_path)))
-        runtime.routine.stop()
+        runtime.shutdown()
     except Exception as exc:
         checks.append(("Runtime", False, str(exc)))
     for name, ok, detail in checks:
         print(f"[{'OK' if ok else 'MISSING'}] {name}: {detail}")
-    required = {"Python 3.11+", "Ollama executable", "fastapi", "uvicorn", "pyswip", "send2trash", "psutil", "SQLite brain + FTS"}
+    required = {
+        "Python 3.11+", "Ollama executable", "SWI-Prolog", "pyswip",
+        "Prolog Python bridge", "fastapi", "uvicorn", "send2trash", "psutil",
+        "SQLite brain + FTS",
+    }
     return 0 if all(ok for name, ok, _ in checks if name in required) else 2
 
 

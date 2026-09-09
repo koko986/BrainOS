@@ -60,3 +60,29 @@ def test_websites_resolve_to_official_urls_and_unknown_terms_search(tmp_path, mo
 
     assert known.ok and launched[0][-1] == "https://www.youtube.com/"
     assert search.ok and launched[1][-1].startswith("https://www.google.com/search?q=Python+graph+tutorials")
+
+
+def test_apps_can_be_discovered_from_desktop_shortcuts(tmp_path, monkeypatch):
+    user = tmp_path / "User"
+    public = tmp_path / "Public"
+    desktop = user / "Desktop"
+    public_desktop = public / "Desktop"
+    desktop.mkdir(parents=True)
+    public_desktop.mkdir(parents=True)
+    eclipse = desktop / "Eclipse IDE for Java and DSL Developers - 2026-06.lnk"
+    youtube = desktop / "YouTube Desktop.lnk"
+    genymotion = public_desktop / "Genymotion.lnk"
+    for shortcut in (eclipse, youtube, genymotion):
+        shortcut.write_bytes(b"shortcut")
+    monkeypatch.setenv("USERPROFILE", str(user))
+    monkeypatch.setenv("PUBLIC", str(public))
+    monkeypatch.delenv("OneDrive", raising=False)
+    monkeypatch.delenv("OneDriveConsumer", raising=False)
+    monkeypatch.setattr("marlin.actions.shutil.which", lambda _name: None)
+    monkeypatch.setattr(ComputerActionService, "_registered_app_path", staticmethod(lambda _name: None))
+    monkeypatch.setattr(ComputerActionService, "_start_menu_shortcut", staticmethod(lambda _name: None))
+
+    assert ComputerActionService._app_command("eclipse") == str(eclipse)
+    assert ComputerActionService._app_command("desktop youtube") == str(youtube)
+    assert ComputerActionService._app_command("the desktop youtube app") == str(youtube)
+    assert ComputerActionService._app_command("genymotion") == str(genymotion)

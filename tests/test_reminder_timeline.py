@@ -44,3 +44,16 @@ def test_v3_migration_preserves_v2_reminders(tmp_path):
     assert store.list_reminders()[0]['text'] == 'Keep this'
     assert store.list_reminders()[0]['notified_at'] is None
     assert store.migrate() is None
+
+
+def test_due_reminder_plays_chime_and_speaks(tmp_path, monkeypatch):
+    settings = MarlinSettings(database_path=tmp_path / 'brain.db', voice_output=False, auto_index_c_drive=False)
+    runtime = MarlinRuntime(settings, start_background=False)
+    calls = []
+    monkeypatch.setattr('marlin.runtime.play_notification_sound', lambda: calls.append('chime') or True)
+    monkeypatch.setattr(runtime.voice, 'speak', lambda message: calls.append(message))
+
+    runtime._reminder_fired({'id': 'reminder-1', 'text': 'Review Prolog'})
+
+    assert calls == ['chime', 'Reminder: Review Prolog']
+    runtime.shutdown()

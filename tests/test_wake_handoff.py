@@ -6,6 +6,14 @@ from types import SimpleNamespace
 from second_brain.app import voice
 
 
+def test_wake_phrase_requires_hey_marlin():
+    listener = voice.WakeWordListener('', ['hey marlin', 'hey marlon', 'hey merlin'])
+
+    assert not listener.matches('marlin')
+    assert listener.matches('hey marlin')
+    assert listener.matches('hey marlon')
+
+
 def test_continuous_wake_preserves_phrase_and_command(monkeypatch):
     block = b'\x00\x04' * 4000
     silence = bytes(8000)

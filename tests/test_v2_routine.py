@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import time
+from datetime import UTC, datetime, timedelta
+
 from marlin.config import MarlinSettings
 from marlin.events import EventBus
 from marlin.routine import AssistantState, RoutineService
@@ -41,3 +44,38 @@ def test_follow_up_uses_recent_local_context(tmp_path):
     store.add_context("file", target)
     assert routine.resolve_follow_up("open it again") == ("open_path", {"path": target})
 
+
+def test_add_reminder_follow_up_uses_latest_schedule(tmp_path):
+    store, _state, routine = make_routine(tmp_path)
+    due = datetime.now().astimezone() + timedelta(hours=2)
+    store.add_schedule_item("Exam", kind="event", start_at=due.isoformat(), end_at=(due + timedelta(hours=1)).isoformat(), fixed=True)
+    reply = routine.handle("also add reminder")
+    reminder = store.list_reminders()[0]
+    assert reply and "Reminder saved for" in reply
+    assert reminder["text"] == "Exam"
+    assert datetime.fromisoformat(reminder["due_at"]).astimezone().replace(microsecond=0) == due.replace(microsecond=0)
+
+
+def test_reminder_time_first_and_day_before_clock(tmp_path):
+    store, _state, routine = make_routine(tmp_path)
+    assert routine.handle("set reminder for tomorrow 10 am exam")
+    assert routine.handle("remind me to study tomorrow at 11 am")
+    reminders = store.list_reminders()
+    assert {item["text"] for item in reminders} == {"exam", "study"}
+    assert all(datetime.fromisoformat(item["due_at"]).astimezone().date() > datetime.now().astimezone().date() for item in reminders)
+
+
+def test_due_reminder_inv_delivered_to_callback(tmp_path):
+    store, state, _routine = make_routine(tmp_path)
+    delivered = []
+    routine = RoutineService(
+        MarlinSettings(database_path=store.database_path, weather_enabled=False, voice_output=False, auto_index_c_drive=False),
+        store, _routine.reasoning, state, _routine.events, on_reminder=delivered.append,
+    )
+    store.add_reminder("Check MARLIN", datetime.now(UTC) - timedelta(seconds=1))
+    routine.start()
+    deadline = time.monotonic() + 3
+    while not delivered and time.monotonic() < deadline:
+        time.sleep(.05)
+    routine.stop()
+    assert delivered[0]["text"] == "Check MARLIN"
