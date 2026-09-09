@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import secrets
 import sqlite3
 import uuid
 from contextlib import contextmanager
@@ -11,7 +13,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 V2_SCHEMA = """
 CREATE TABLE IF NOT EXISTS marlin_meta (
@@ -161,6 +163,48 @@ CREATE TABLE IF NOT EXISTS file_insights (
     technologies_json TEXT NOT NULL DEFAULT '[]',
     analyzed_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS telegram_identities (
+    user_id INTEGER PRIMARY KEY,
+    chat_id INTEGER NOT NULL,
+    role TEXT NOT NULL CHECK(role IN ('owner', 'contact', 'pending')),
+    alias TEXT COLLATE NOCASE UNIQUE,
+    display_name TEXT NOT NULL DEFAULT '',
+    active INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS telegram_pair_codes (
+    code TEXT PRIMARY KEY,
+    expires_at TEXT NOT NULL,
+    used_at TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS telegram_message_drafts (
+    id TEXT PRIMARY KEY,
+    recipient_user_id INTEGER NOT NULL,
+    recipient_alias TEXT NOT NULL,
+    content TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    expires_at TEXT NOT NULL,
+    telegram_message_id INTEGER,
+    error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    resolved_at TEXT,
+    FOREIGN KEY(recipient_user_id) REFERENCES telegram_identities(user_id)
+);
+CREATE TABLE IF NOT EXISTS telegram_deliveries (
+    id TEXT PRIMARY KEY,
+    dedupe_key TEXT UNIQUE,
+    kind TEXT NOT NULL,
+    recipient_user_id INTEGER,
+    content TEXT NOT NULL,
+    status TEXT NOT NULL,
+    telegram_message_id INTEGER,
+    error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    sent_at TEXT
+);
 CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, id);
 CREATE INDEX IF NOT EXISTS idx_alarms_due ON alarms(enabled, due_at);
 CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(completed, due_at);
@@ -170,6 +214,9 @@ CREATE INDEX IF NOT EXISTS idx_schedule_items_due ON schedule_items(status, dead
 CREATE INDEX IF NOT EXISTS idx_schedule_blocks_time ON schedule_blocks(start_at, end_at);
 CREATE INDEX IF NOT EXISTS idx_preferences_active ON preferences(active, category);
 CREATE INDEX IF NOT EXISTS idx_research_sources_run ON research_sources(run_id, rank);
+CREATE INDEX IF NOT EXISTS idx_telegram_identity_role ON telegram_identities(role, active);
+CREATE INDEX IF NOT EXISTS idx_telegram_drafts_status ON telegram_message_drafts(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_telegram_delivery_created ON telegram_deliveries(created_at DESC);
 """
 
 
@@ -728,6 +775,278 @@ class MarlinStore:
     def set_research_source_score(self, source_id: str, score: int) -> None:
         with self.connect() as connection:
             connection.execute("UPDATE research_sources SET prolog_score=? WHERE id=?", (score, source_id))
+
+    def create_telegram_pair_code(self, *, minutes: int = 10) -> dict[str, Any]:
+        created = datetime.now(UTC)
+        expires = created + timedelta(minutes=minutes)
+        with self.connect() as connection:
+            connection.execute(
+                "DELETE FROM telegram_pair_codes WHERE used_at IS NOT NULL OR expires_at <= ?",
+                (created.isoformat(timespec="seconds"),),
+            )
+            for _ in range(20):
+                code = f"{secrets.randbelow(1_000_000):06d}"
+                try:
+                    connection.execute(
+                        "INSERT INTO telegram_pair_codes(code,expires_at,created_at) VALUES(?,?,?)",
+                        (code, expires.isoformat(timespec="seconds"), created.isoformat(timespec="seconds")),
+                    )
+                    return {"code": code, "expires_at": expires.isoformat(timespec="seconds")}
+                except sqlite3.IntegrityError:
+                    continue
+        raise RuntimeError("Could not generate a unique Telegram pairing code.")
+
+    def pair_telegram_owner(
+        self, code: str, *, user_id: int, chat_id: int, display_name: str
+    ) -> dict[str, Any]:
+        stamp = now_iso()
+        with self.connect() as connection:
+            pair = connection.execute(
+                "SELECT * FROM telegram_pair_codes WHERE code=? AND used_at IS NULL AND expires_at>?",
+                (str(code).strip(), stamp),
+            ).fetchone()
+            if not pair:
+                raise ValueError("That pairing code is invalid or expired.")
+            owner = connection.execute(
+                "SELECT * FROM telegram_identities WHERE role='owner' AND active=1"
+            ).fetchone()
+            if owner and int(owner["user_id"]) != int(user_id):
+                raise ValueError("MARLIN already has a paired Telegram owner.")
+            connection.execute(
+                "UPDATE telegram_identities SET role='pending',active=0,updated_at=? "
+                "WHERE role='owner' AND user_id<>?",
+                (stamp, int(user_id)),
+            )
+            connection.execute(
+                """INSERT INTO telegram_identities(user_id,chat_id,role,alias,display_name,active,created_at,updated_at)
+                   VALUES(?,?,'owner','owner',?,1,?,?)
+                   ON CONFLICT(user_id) DO UPDATE SET chat_id=excluded.chat_id,role='owner',alias='owner',
+                   display_name=excluded.display_name,active=1,updated_at=excluded.updated_at""",
+                (int(user_id), int(chat_id), display_name[:200], stamp, stamp),
+            )
+            connection.execute("UPDATE telegram_pair_codes SET used_at=? WHERE code=?", (stamp, code))
+            row = connection.execute(
+                "SELECT * FROM telegram_identities WHERE user_id=?", (int(user_id),)
+            ).fetchone()
+        return dict(row)
+
+    def telegram_owner(self) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM telegram_identities WHERE role='owner' AND active=1 LIMIT 1"
+            ).fetchone()
+        return dict(row) if row else None
+
+    def request_telegram_contact(
+        self, *, user_id: int, chat_id: int, display_name: str
+    ) -> dict[str, Any]:
+        stamp = now_iso()
+        with self.connect() as connection:
+            existing = connection.execute(
+                "SELECT * FROM telegram_identities WHERE user_id=?", (int(user_id),)
+            ).fetchone()
+            if existing and existing["role"] in {"owner", "contact"}:
+                return dict(existing)
+            connection.execute(
+                """INSERT INTO telegram_identities(user_id,chat_id,role,display_name,active,created_at,updated_at)
+                   VALUES(?,?,'pending',?,0,?,?)
+                   ON CONFLICT(user_id) DO UPDATE SET chat_id=excluded.chat_id,display_name=excluded.display_name,
+                   updated_at=excluded.updated_at""",
+                (int(user_id), int(chat_id), display_name[:200], stamp, stamp),
+            )
+            row = connection.execute(
+                "SELECT * FROM telegram_identities WHERE user_id=?", (int(user_id),)
+            ).fetchone()
+        return dict(row)
+
+    def approve_telegram_contact(self, user_id: int, alias: str) -> dict[str, Any] | None:
+        normalized = " ".join(str(alias).strip().split())
+        if not normalized or len(normalized) > 80:
+            raise ValueError("Contact alias must be between 1 and 80 characters.")
+        stamp = now_iso()
+        with self.connect() as connection:
+            try:
+                cursor = connection.execute(
+                    "UPDATE telegram_identities SET role='contact',alias=?,active=1,updated_at=? "
+                    "WHERE user_id=? AND role='pending'",
+                    (normalized, stamp, int(user_id)),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise ValueError("That Telegram contact alias is already in use.") from exc
+            if not cursor.rowcount:
+                return None
+            row = connection.execute(
+                "SELECT * FROM telegram_identities WHERE user_id=?", (int(user_id),)
+            ).fetchone()
+        return dict(row)
+
+    def reject_telegram_contact(self, user_id: int) -> bool:
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM telegram_identities WHERE user_id=? AND role='pending'", (int(user_id),)
+            )
+        return bool(cursor.rowcount)
+
+    def revoke_telegram_contact(self, user_id: int) -> bool:
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "UPDATE telegram_identities SET active=0,updated_at=? WHERE user_id=? AND role='contact'",
+                (now_iso(), int(user_id)),
+            )
+        return bool(cursor.rowcount)
+
+    def telegram_contacts(self, *, include_pending: bool = True) -> list[dict[str, Any]]:
+        clause = "WHERE role IN ('contact','pending')" if include_pending else "WHERE role='contact' AND active=1"
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM telegram_identities {clause} ORDER BY role,alias,display_name"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def telegram_contact_by_alias(self, alias: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM telegram_identities WHERE role='contact' AND active=1 AND alias=? COLLATE NOCASE",
+                (str(alias).strip(),),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def create_telegram_draft(self, alias: str, content: str, *, minutes: int = 2) -> dict[str, Any]:
+        target = self.telegram_contact_by_alias(alias)
+        message = str(content).strip()
+        if target is None:
+            raise ValueError(f"No active Telegram contact is named {alias}.")
+        if not message or len(message) > 4096:
+            raise ValueError("Telegram messages must contain 1 to 4096 characters.")
+        draft_id = uuid.uuid4().hex
+        digest = hashlib.sha256(message.encode("utf-8")).hexdigest()
+        expires = datetime.now(UTC) + timedelta(minutes=minutes)
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT INTO telegram_message_drafts
+                   (id,recipient_user_id,recipient_alias,content,content_hash,status,expires_at,created_at)
+                   VALUES(?,?,?,?,?,'pending',?,?)""",
+                (draft_id, target["user_id"], target["alias"], message, digest,
+                 expires.isoformat(timespec="seconds"), now_iso()),
+            )
+        return self.get_telegram_draft(draft_id) or {}
+
+    def get_telegram_draft(self, draft_id: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM telegram_message_drafts WHERE id=?", (draft_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def claim_telegram_draft(self, draft_id: str) -> dict[str, Any]:
+        stamp = now_iso()
+        with self.connect() as connection:
+            row = connection.execute(
+                """SELECT d.*,i.chat_id,i.active AS recipient_active
+                   FROM telegram_message_drafts d JOIN telegram_identities i ON i.user_id=d.recipient_user_id
+                   WHERE d.id=?""",
+                (draft_id,),
+            ).fetchone()
+            if not row or row["status"] != "pending":
+                raise ValueError("That message draft is missing or was already used.")
+            if row["expires_at"] <= stamp:
+                connection.execute(
+                    "UPDATE telegram_message_drafts SET status='expired',resolved_at=? WHERE id=?",
+                    (stamp, draft_id),
+                )
+                raise ValueError("That message draft expired. Please create it again.")
+            if not row["recipient_active"]:
+                raise ValueError("That Telegram contact is no longer active.")
+            digest = hashlib.sha256(str(row["content"]).encode("utf-8")).hexdigest()
+            if not secrets.compare_digest(digest, str(row["content_hash"])):
+                raise ValueError("The message draft changed after preview and was blocked.")
+            cursor = connection.execute(
+                "UPDATE telegram_message_drafts SET status='sending' WHERE id=? AND status='pending'",
+                (draft_id,),
+            )
+            if not cursor.rowcount:
+                raise ValueError("That message draft was already used.")
+        return dict(row)
+
+    def finish_telegram_draft(
+        self, draft_id: str, *, status: str, message_id: int | None = None, error: str = ""
+    ) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE telegram_message_drafts SET status=?,telegram_message_id=?,error=?,resolved_at=? WHERE id=?",
+                (status, message_id, error[:500], now_iso(), draft_id),
+            )
+        return self.get_telegram_draft(draft_id)
+
+    def cancel_telegram_draft(self, draft_id: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "UPDATE telegram_message_drafts SET status='cancelled',resolved_at=? WHERE id=? AND status='pending'",
+                (now_iso(), draft_id),
+            )
+        return self.get_telegram_draft(draft_id) if cursor.rowcount else None
+
+    def telegram_drafts(self, limit: int = 20) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM telegram_message_drafts ORDER BY created_at DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def record_telegram_delivery(
+        self, *, kind: str, content: str, recipient_user_id: int | None,
+        status: str, dedupe_key: str | None = None, message_id: int | None = None,
+        error: str = "",
+    ) -> dict[str, Any]:
+        item = {
+            "id": uuid.uuid4().hex, "dedupe_key": dedupe_key, "kind": kind,
+            "recipient_user_id": recipient_user_id, "content": content[:4096], "status": status,
+            "telegram_message_id": message_id, "error": error[:500], "created_at": now_iso(),
+            "sent_at": now_iso() if status == "sent" else None,
+        }
+        with self.connect() as connection:
+            if dedupe_key:
+                connection.execute(
+                    """INSERT INTO telegram_deliveries
+                       (id,dedupe_key,kind,recipient_user_id,content,status,telegram_message_id,error,created_at,sent_at)
+                       VALUES(:id,:dedupe_key,:kind,:recipient_user_id,:content,:status,:telegram_message_id,:error,:created_at,:sent_at)
+                       ON CONFLICT(dedupe_key) DO UPDATE SET
+                         kind=excluded.kind,
+                         recipient_user_id=excluded.recipient_user_id,
+                         content=excluded.content,
+                         status=excluded.status,
+                         telegram_message_id=excluded.telegram_message_id,
+                         error=excluded.error,
+                         sent_at=excluded.sent_at""",
+                    item,
+                )
+            else:
+                connection.execute(
+                    """INSERT INTO telegram_deliveries
+                       (id,dedupe_key,kind,recipient_user_id,content,status,telegram_message_id,error,created_at,sent_at)
+                       VALUES(:id,:dedupe_key,:kind,:recipient_user_id,:content,:status,:telegram_message_id,:error,:created_at,:sent_at)""",
+                    item,
+                )
+            if dedupe_key:
+                row = connection.execute(
+                    "SELECT * FROM telegram_deliveries WHERE dedupe_key=?", (dedupe_key,)
+                ).fetchone()
+                return dict(row)
+        return item
+
+    def telegram_delivery_exists(self, dedupe_key: str) -> bool:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM telegram_deliveries WHERE dedupe_key=? AND status='sent'", (dedupe_key,)
+            ).fetchone()
+        return bool(row)
+
+    def telegram_deliveries(self, limit: int = 20) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM telegram_deliveries ORDER BY created_at DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def upsert_file_insight(
         self,

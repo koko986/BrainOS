@@ -34,6 +34,12 @@ def build_parser() -> argparse.ArgumentParser:
     setup.add_argument("--launch-on-login", action="store_true", help="Start MARLIN voice mode at Windows login.")
     sub.add_parser("doctor", help="Check every local MARLIN subsystem.")
     sub.add_parser("scheduler-tick", help=argparse.SUPPRESS)
+    telegram = sub.add_parser("telegram", help="Pair and inspect the private Telegram bridge.")
+    telegram_sub = telegram.add_subparsers(dest="telegram_command", required=True)
+    telegram_sub.add_parser("pair", help="Create a one-use owner pairing code.")
+    telegram_sub.add_parser("status", help="Show Telegram configuration and pairing status.")
+    telegram_sub.add_parser("contacts", help="List approved and pending Telegram contacts.")
+    telegram_sub.add_parser("test", help="Send a test message to the paired owner.")
     ask = sub.add_parser("ask", help="Run one MARLIN command.")
     ask.add_argument("text")
     sub.add_parser("seed-demo")
@@ -64,6 +70,12 @@ def main(argv: list[str] | None = None) -> int:
     if command == "scheduler-tick":
         from marlin.scheduler_runner import run_once
         return run_once(settings)
+    if command == "telegram":
+        runtime = MarlinRuntime(settings, start_background=False)
+        try:
+            return run_telegram(runtime, args.telegram_command)
+        finally:
+            runtime.shutdown()
     if command == 'desktop':
         from marlin.desktop import launch
         return launch(settings)
@@ -165,6 +177,47 @@ def run_voice(runtime: MarlinRuntime) -> None:
         runtime.shutdown()
 
 
+def run_telegram(runtime: MarlinRuntime, command: str) -> int:
+    if command == "pair":
+        try:
+            pair = runtime.telegram.create_pair_code()
+        except RuntimeError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        print(f"Telegram pairing code: {pair['code']}")
+        print(f"Send /pair {pair['code']} to your MARLIN bot before {pair['expires_at']}.")
+        return 0
+    if command == "status":
+        status = runtime.telegram.status()
+        owner = status.get("owner")
+        print(f"Enabled: {status['enabled']}")
+        print(f"Bot token configured: {status['configured']}")
+        print(f"Owner: {owner['display_name']} ({owner['user_id']})" if owner else "Owner: not paired")
+        print(f"Contacts: {len(status['contacts'])}")
+        return 0
+    if command == "contacts":
+        contacts = runtime.store.telegram_contacts()
+        if not contacts:
+            print("No Telegram contacts.")
+        for item in contacts:
+            print(f"{item.get('alias') or '(pending)'}\t{item['display_name']}\t{item['role']}\t{item['user_id']}")
+        return 0
+    if command == "test":
+        if not runtime.settings.telegram_enabled or not runtime.settings.telegram_bot_token:
+            print("Telegram is disabled or its bot token is missing.", file=sys.stderr)
+            return 2
+        from marlin.telegram import TelegramHTTPTransport
+        runtime.telegram.transport = TelegramHTTPTransport(runtime.settings.telegram_bot_token)
+        try:
+            runtime.telegram.send_test()
+        except (ValueError, RuntimeError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        print("Telegram test message sent.")
+        return 0
+    return 2
+
+
 def run_setup(settings: MarlinSettings) -> int:
     setup_ok = True
     print("Installing MARLIN V2 local dependencies...")
@@ -224,6 +277,12 @@ def run_doctor(settings: MarlinSettings) -> int:
     checks.append(("Vosk wake model", settings.vosk_model_path.exists(), str(settings.vosk_model_path)))
     checks.append(("Piper voice model", (settings.piper_data_dir / f"{settings.piper_voice}.onnx").exists(), settings.piper_voice))
     checks.append(("Desktop wrapper", importlib.util.find_spec("webview") is not None, "pywebview"))
+    if settings.telegram_enabled:
+        checks.append((
+            "Telegram bot token",
+            bool(settings.telegram_bot_token),
+            "configured" if settings.telegram_bot_token else "missing (token is never displayed)",
+        ))
     checks.append(("NVIDIA GPU tools", bool(shutil.which("nvidia-smi")), shutil.which("nvidia-smi") or "not detected"))
     try:
         from marlin.scheduler_runner import runner_status

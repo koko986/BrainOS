@@ -22,6 +22,7 @@
       <button id="toggleMemory" aria-expanded="false" aria-controls="memoryPanel">Memory</button>
       <button id="toggleResearch" aria-expanded="false" aria-controls="researchPanel">Research</button>
       <button id="toggleProlog" aria-expanded="false" aria-controls="prologPanel">Prolog</button>
+      <button id="toggleMessaging" aria-expanded="false" aria-controls="messagingPanel">Messaging</button>
     </nav>
     <section id="statusPanel" class="panel compact moveable" data-key="status">
       <header>LOCAL SYSTEM</header>
@@ -38,6 +39,10 @@
     </section>
     <section id="prologPanel" class="panel agent-panel wide moveable" data-key="prolog">
       <header>PROLOG ACTIVITY</header><div id="prologContent" class="panel-content">No predicate invoked yet.</div>
+    </section>
+    <section id="messagingPanel" class="panel agent-panel wide moveable" data-key="messaging">
+      <header>TELEGRAM MESSAGING</header>
+      <div id="messagingContent" class="panel-content">Telegram disabled.</div>
     </section>
     <section id="routinePanel" class="panel compact moveable" data-key="routine">
       <header>REMINDERS &amp; ALARMS</header>
@@ -81,6 +86,6 @@
     </section>
     <div id="graphLegend">PROJECT KNOWLEDGE</div>
   </main>
-  <script src="/assets/app.js?v=agent10"></script>
+  <script src="/assets/app.js?v=agent11"></script>
 </body>
 </html>

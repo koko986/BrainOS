@@ -4,6 +4,7 @@ MARLIN V2 is a fully local, JARVIS-style Windows assistant. Conversation runs
 through Ollama and `qwen3:4b-instruct`; voice input uses Faster-Whisper; voice
 output uses Piper; knowledge is stored in SQLite; symbolic reasoning uses
 SWI-Prolog. No paid service, account, or API key is required.
+Telegram is an optional remote interface and uses a free BotFather bot token.
 
 ## First setup
 
@@ -31,6 +32,38 @@ py main.py terminal    # terminal conversation and commands
 py main.py voice       # wake-word mode
 py main.py serve       # browser cockpit
 ```
+
+## Optional Telegram interface
+
+Create a private bot with Telegram's `@BotFather`, then place its token only in
+the ignored `.env` file:
+
+```text
+MARLIN_TELEGRAM_ENABLED=true
+MARLIN_TELEGRAM_BOT_TOKEN=your_botfather_token
+MARLIN_TELEGRAM_BRIEFING_TIME=08:00
+```
+
+Pair the owner account with a one-use code:
+
+```powershell
+py main.py telegram pair
+py main.py telegram status
+py main.py telegram contacts
+py main.py telegram test
+```
+
+Send `/pair CODE` to the bot. The paired owner can use `/status`, `/briefing`,
+`/reminders`, `/schedule`, `/priority`, `/graph`, `/search topic`, `/research topic`,
+and `/contacts`. A contact must first send `/start`; approve and name the request
+in the cockpit or with `/name USER_ID Alias`. `tell Alex I will arrive at eight`
+creates a two-minute draft with **Send** and **Cancel** controls. It never sends
+before owner approval.
+
+Telegram can read safe status, reasoning, reminders, schedules, graph summaries,
+and filtered file-search results. Remote app, camera, shell, and file-changing
+commands are blocked. Interactive Telegram access and alerts run only while
+MARLIN is open; local Windows reminder delivery remains separate.
 
 The desktop cockpit opens the native `pywebview` window when available and
 falls back to the browser at `http://127.0.0.1:8765`.

@@ -61,6 +61,9 @@ class MarlinSettings:
     weather_longitude: float = 96.1735
     launch_on_login: bool = False
     voice_output: bool = True
+    telegram_enabled: bool = False
+    telegram_bot_token: str = ""
+    telegram_briefing_time: str = "08:00"
 
     @classmethod
     def from_env(cls) -> "MarlinSettings":
@@ -95,4 +98,9 @@ class MarlinSettings:
             weather_longitude=float(os.getenv("MARLIN_WEATHER_LONGITUDE", str(defaults.weather_longitude))),
             launch_on_login=_bool("MARLIN_LAUNCH_ON_LOGIN", defaults.launch_on_login),
             voice_output=_bool("MARLIN_VOICE_OUTPUT", defaults.voice_output),
+            telegram_enabled=_bool("MARLIN_TELEGRAM_ENABLED", defaults.telegram_enabled),
+            telegram_bot_token=os.getenv("MARLIN_TELEGRAM_BOT_TOKEN", defaults.telegram_bot_token).strip(),
+            telegram_briefing_time=os.getenv(
+                "MARLIN_TELEGRAM_BRIEFING_TIME", defaults.telegram_briefing_time
+            ).strip(),
         )

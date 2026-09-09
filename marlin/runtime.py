@@ -18,6 +18,7 @@ from marlin.indexer import IncrementalIndexer, IndexProgress
 from marlin.file_understanding import FileUnderstandingService
 from marlin.local_model import LocalModelUnavailable, OllamaLocalModel
 from marlin.notifications import play_notification_sound
+from marlin.telegram import TelegramBridge
 from marlin.planner import ScheduleService
 from marlin.preferences import PreferenceService
 from marlin.research import InternetResearchService
@@ -107,6 +108,13 @@ class MarlinRuntime:
             on_alarm=self._alarm_fired,
             on_reminder=self._reminder_fired,
         )
+        self.telegram = TelegramBridge(
+            self.settings,
+            self.store,
+            self.events,
+            remote_command=self.telegram_command,
+            briefing=self.routine.morning_briefing,
+        )
         self._wake_stop = threading.Event()
         self._wake_thread: threading.Thread | None = None
         self._chat_stop = threading.Event()
@@ -116,6 +124,7 @@ class MarlinRuntime:
         self._graph_cache: dict[tuple[str, int], dict[str, Any]] = {}
         self._graph_lock = threading.Lock()
         if start_background:
+            self.telegram.start()
             self.routine.start()
             self.voice.stt.preload_async()
             self.voice.preload_speech()
@@ -395,6 +404,7 @@ class MarlinRuntime:
         self._wake_stop.set()
         self.stop_voice_chat()
         self.voice.stop()
+        self.telegram.stop()
         self.routine.stop()
 
     def _wake_worker(self) -> None:
@@ -467,9 +477,131 @@ class MarlinRuntime:
             "preferences": self.store.list_preferences(),
             "research": self.store.recent_research(3),
             "prolog_activity": self._last_prolog_activity,
+            "telegram": self.telegram.status(),
             "recent_actions": self.store.recent_actions(12),
             "backup": str(self.backup_path) if self.backup_path else "",
         }
+
+    def telegram_command(self, text: str) -> str:
+        """Execute the deliberately narrow remote Telegram command surface."""
+        prompt = str(text or "").strip()
+        command = " ".join(prompt.lower().split())
+        blocked = (
+            "open ", "close ", "delete ", "move ", "rename ", "edit ", "write ",
+            "create file", "create folder", "camera", "powershell", "command prompt",
+            "cmd ", "shell ", "turn off", "shutdown", "play ", "volume ",
+        )
+        if command.startswith(blocked):
+            return "That computer action is blocked remotely. Run it from the local MARLIN cockpit."
+        if command in {"/status", "status"}:
+            model = self.model.health()
+            return (
+                f"MARLIN is {self.state.value}. Local model: "
+                f"{'ready' if model.get('available') else 'unavailable'}. "
+                f"Prolog: {'ready' if self.reasoning.engine.loaded else 'unavailable'}. "
+                f"File index: {self.index_status}."
+            )
+        if command in {"/briefing", "briefing", "morning briefing"}:
+            return self.routine.morning_briefing()
+        if command in {"/reminders", "reminders", "show reminders"}:
+            items = self.store.list_reminders()
+            if not items:
+                return "You have no pending reminders."
+            lines = []
+            for item in items[:12]:
+                when = ""
+                if item.get("due_at"):
+                    when = " at " + datetime.fromisoformat(item["due_at"]).astimezone().strftime("%d %b, %I:%M %p")
+                lines.append(f"- {item['text']}{when}")
+            return "Pending reminders:\n" + "\n".join(lines)
+        if command in {"/schedule", "schedule", "show schedule"}:
+            items = self.store.list_schedule_items()
+            if not items:
+                return "Your schedule is empty."
+            lines = []
+            for item in items[:12]:
+                when = item.get("start_at") or item.get("deadline_at") or "unscheduled"
+                if when != "unscheduled":
+                    when = datetime.fromisoformat(when).astimezone().strftime("%d %b, %I:%M %p")
+                lines.append(f"- {item['title']}: {when}")
+            return "Schedule:\n" + "\n".join(lines)
+        if command in {"/priority", "priority", "high priority tasks"}:
+            try:
+                tasks = self.reasoning.high_priority_tasks()
+            except PrologUnavailable as exc:
+                return f"Prolog is unavailable: {exc}"
+            if not tasks:
+                return "Prolog found no high-priority tasks."
+            return "Prolog priorities:\n" + "\n".join(f"- {item.name}" for item in tasks[:12])
+        if command in {"/graph", "graph", "explain graph"}:
+            payload = self.graph(1200)
+            projects = [node for node in payload["nodes"] if node.get("type") == "folder" and node.get("metadata", {}).get("path")]
+            return (
+                f"The project graph contains {len(payload['nodes'])} visible nodes and "
+                f"{len(payload['links'])} relationships under {payload['root']}. "
+                f"It currently includes {len(projects)} folder nodes."
+            )
+        match = re.fullmatch(r"/search(?:\s+(.+))?", prompt, re.I | re.S)
+        if match:
+            query = (match.group(1) or "").strip()
+            if not query:
+                return "Use /search followed by a filename or concept."
+            results = [
+                item for item in self.store.search_files(query, 20)
+                if self._telegram_file_result_safe(item)
+            ][:8]
+            if not results:
+                return f"No indexed files matched {query}."
+            return "File matches:\n" + "\n".join(
+                f"- {item['name']}: {item['path']}"
+                + (f"\n  {' '.join(str(item.get('snippet') or '').split())[:180]}" if item.get("snippet") else "")
+                for item in results
+            )[:4096]
+        match = re.fullmatch(r"/research(?:\s+(.+))?", prompt, re.I | re.S)
+        if match:
+            query = (match.group(1) or "").strip()
+            if not query:
+                return "Use /research followed by a topic."
+            run = self.research.search(query)
+            sources = run.get("sources", [])[:4]
+            links = "\n".join(f"[{item['rank']}] {item['title']}\n{item['url']}" for item in sources)
+            return (str(run.get("summary") or "Research complete.") + ("\n\n" + links if links else ""))[:4096]
+        if command.startswith("/"):
+            return "That remote command is not supported. Use /help for the safe command list."
+
+        conversation_id = "telegram-owner"
+        self.store.add_message("user", prompt, conversation_id=conversation_id, metadata={"source": "telegram"})
+        messages: list[dict[str, str]] = [{
+            "role": "system",
+            "content": (
+                "You are MARLIN in a private Telegram chat. Reply concisely in plain text. "
+                "You have no tools in this channel. Never claim that you changed the computer, files, apps, or messages."
+            ),
+        }]
+        messages.extend(self.store.recent_messages(6, conversation_id=conversation_id))
+        try:
+            turn = self.model.chat(messages, tools=None)
+            reply = turn.content.strip() or "I could not form a useful local response."
+        except LocalModelUnavailable as exc:
+            reply = str(exc)
+        self.store.add_message("assistant", reply, conversation_id=conversation_id, metadata={"source": "telegram"})
+        return reply[:4096]
+
+    @staticmethod
+    def _telegram_file_result_safe(item: dict[str, Any]) -> bool:
+        path = str(item.get("path") or "").replace("\\", "/").lower()
+        name = str(item.get("name") or "").lower()
+        sensitive_names = {
+            ".env", ".env.local", ".env.production", "credentials.json", "secrets.json",
+            "id_rsa", "id_ed25519", "known_hosts", "wallet.dat",
+        }
+        sensitive_parts = (
+            "/.ssh/", "/.gnupg/", "/appdata/", "/credentials/", "/secrets/",
+            "password", "private_key", "api_key", "apikey", "access_token",
+        )
+        return name not in sensitive_names and not any(
+            part in path or part in name for part in sensitive_parts
+        )
 
     def _summarize_research(self, prompt: str) -> str:
         turn = self.model.chat([
@@ -645,6 +777,16 @@ class MarlinRuntime:
         command = re.sub(r"\bhisself\b|\bhis self\b", "yourself", command)
         polite_command = re.sub(r"^please\s+", "", command)
         polite_command = re.sub(r"\s+(?:please|now)$", "", polite_command).strip()
+        draft_parts = self.telegram.draft_parts(prompt)
+        if draft_parts:
+            try:
+                draft = self.telegram.create_draft(*draft_parts)
+                return self._reply(
+                    f"Message to {draft['recipient_alias']} is ready. Review it and choose Send or Cancel.",
+                    data={"telegram_draft": draft},
+                )
+            except (ValueError, RuntimeError) as exc:
+                return self._reply(str(exc), ok=False)
         self_exit = bool(re.fullmatch(
             r"(?:(?:turn|switch)\s+(?:yourself|your self|marlin)\s+off|"
             r"(?:turn|switch)\s+off\s+(?:yourself|your self|marlin)|"
@@ -693,8 +835,22 @@ class MarlinRuntime:
                 task_id = prompt[len(prefix):].strip()
                 try:
                     explanation = self.reasoning.why_high_priority(task_id)
-                    self.events.publish("prolog.result", query="why_high_priority", task_id=task_id, steps=explanation.steps)
-                    return self._reply(explanation.title + " " + " ".join(explanation.steps), data={"steps": explanation.steps})
+                    activity = {
+                        "engine": "SWI-Prolog via PySWIP",
+                        "predicate": "explain_high_priority/2",
+                        "query": f"explain_high_priority({task_id}, Reason)",
+                        "facts_source": "SQLite projects, tasks, and relationships",
+                        "facts": 1,
+                        "matched_task_ids": [task_id],
+                        "rules": explanation.steps,
+                        "result": explanation.title,
+                    }
+                    self._last_prolog_activity = activity
+                    self.events.publish("prolog.result", **activity)
+                    return self._reply(
+                        explanation.title + " " + " ".join(explanation.steps),
+                        data={"steps": explanation.steps, "prolog_activity": activity},
+                    )
                 except PrologUnavailable as exc:
                     return self._reply(f"Prolog is unavailable: {exc}")
         if command in {
@@ -808,10 +964,14 @@ class MarlinRuntime:
             task_ids = [task.id for task in tasks]
             activity = {
                 "engine": "SWI-Prolog via PySWIP",
+                "predicate": "high_priority/1",
                 "query": "high_priority(Task)",
                 "facts_source": "SQLite projects, tasks, and relationships",
+                "facts": len(task_ids),
                 "matched_task_ids": task_ids,
+                "rules": [step for item in explanations for step in item["steps"]],
                 "explanations": explanations,
+                "result": task_ids,
             }
             if tasks:
                 message = "High-priority tasks: " + ", ".join(task.name for task in tasks) + "."
@@ -831,6 +991,7 @@ class MarlinRuntime:
                         " Prolog activity: Python loaded the SQLite task facts and ran "
                         "high_priority(Task), but no rule matched."
                     )
+            self._last_prolog_activity = activity
             self.events.publish("prolog.result", **activity)
             return self._reply(message, data={"tasks": task_ids, "prolog_activity": activity})
         except PrologUnavailable as exc:

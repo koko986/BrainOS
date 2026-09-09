@@ -70,6 +70,15 @@ class SourceSaveBody(BaseModel):
     note: str = Field(default="", max_length=1000)
 
 
+class TelegramContactBody(BaseModel):
+    alias: str = Field(min_length=1, max_length=80)
+
+
+class TelegramDraftBody(BaseModel):
+    alias: str = Field(min_length=1, max_length=80)
+    content: str = Field(min_length=1, max_length=4096)
+
+
 def create_app(runtime: MarlinRuntime | None = None) -> FastAPI:
     marlin = runtime or MarlinRuntime()
     token = secrets.token_urlsafe(32)
@@ -318,6 +327,89 @@ def create_app(runtime: MarlinRuntime | None = None) -> FastAPI:
         require_token(x_marlin_token)
         try: return marlin.files.explain_project(body.query)
         except (OSError, ValueError, PermissionError) as exc: raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get('/api/telegram/status')
+    def telegram_status(x_marlin_token: str | None = Header(default=None)) -> dict[str, Any]:
+        require_token(x_marlin_token)
+        return marlin.telegram.status()
+
+    @app.post('/api/telegram/pair-code')
+    def telegram_pair_code(x_marlin_token: str | None = Header(default=None)) -> dict[str, Any]:
+        require_token(x_marlin_token)
+        try:
+            return marlin.telegram.create_pair_code()
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.get('/api/telegram/contacts')
+    def telegram_contacts(x_marlin_token: str | None = Header(default=None)) -> list[dict[str, Any]]:
+        require_token(x_marlin_token)
+        return marlin.store.telegram_contacts()
+
+    @app.post('/api/telegram/contacts/{user_id}/approve')
+    def telegram_approve_contact(
+        user_id: int, body: TelegramContactBody, x_marlin_token: str | None = Header(default=None)
+    ) -> dict[str, Any]:
+        require_token(x_marlin_token)
+        try:
+            result = marlin.telegram.approve_contact(user_id, body.alias)
+        except (ValueError, RuntimeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return result
+
+    @app.delete('/api/telegram/contacts/{user_id}')
+    def telegram_revoke_contact(
+        user_id: int, x_marlin_token: str | None = Header(default=None)
+    ) -> dict[str, bool]:
+        require_token(x_marlin_token)
+        changed = marlin.store.reject_telegram_contact(user_id) or marlin.store.revoke_telegram_contact(user_id)
+        if not changed:
+            raise HTTPException(status_code=404, detail='Telegram contact not found.')
+        marlin.events.publish('telegram.contact.revoked', user_id=user_id)
+        return {'revoked': True}
+
+    @app.get('/api/telegram/drafts')
+    def telegram_drafts(x_marlin_token: str | None = Header(default=None)) -> list[dict[str, Any]]:
+        require_token(x_marlin_token)
+        return marlin.store.telegram_drafts()
+
+    @app.post('/api/telegram/drafts')
+    def telegram_create_draft(
+        body: TelegramDraftBody, x_marlin_token: str | None = Header(default=None)
+    ) -> dict[str, Any]:
+        require_token(x_marlin_token)
+        try:
+            return marlin.telegram.create_draft(body.alias, body.content)
+        except (ValueError, RuntimeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post('/api/telegram/drafts/{draft_id}/approve')
+    def telegram_approve_draft(
+        draft_id: str, x_marlin_token: str | None = Header(default=None)
+    ) -> dict[str, Any]:
+        require_token(x_marlin_token)
+        try:
+            return marlin.telegram.approve_draft(draft_id)
+        except (ValueError, RuntimeError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post('/api/telegram/drafts/{draft_id}/cancel')
+    def telegram_cancel_draft(
+        draft_id: str, x_marlin_token: str | None = Header(default=None)
+    ) -> dict[str, Any]:
+        require_token(x_marlin_token)
+        try:
+            return marlin.telegram.cancel_draft(draft_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post('/api/telegram/test')
+    def telegram_test(x_marlin_token: str | None = Header(default=None)) -> dict[str, Any]:
+        require_token(x_marlin_token)
+        try:
+            return marlin.telegram.send_test()
+        except (ValueError, RuntimeError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.websocket("/api/events")
     async def events(websocket: WebSocket) -> None:

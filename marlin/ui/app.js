@@ -323,7 +323,7 @@ document.getElementById('talkNow').addEventListener('click', async event => {
   } catch (error) { feedback(error.message, true); }
   finally { busy(button, false); }
 });
-for (const [buttonId, panelId] of [['toggleStatus', 'statusPanel'], ['toggleRoutine', 'routinePanel'], ['toggleSchedule', 'schedulePanel'], ['toggleMemory', 'memoryPanel'], ['toggleResearch', 'researchPanel'], ['toggleProlog', 'prologPanel']]) {
+for (const [buttonId, panelId] of [['toggleStatus', 'statusPanel'], ['toggleRoutine', 'routinePanel'], ['toggleSchedule', 'schedulePanel'], ['toggleMemory', 'memoryPanel'], ['toggleResearch', 'researchPanel'], ['toggleProlog', 'prologPanel'], ['toggleMessaging', 'messagingPanel']]) {
   const button = document.getElementById(buttonId);
   const panel = document.getElementById(panelId);
   button.addEventListener('click', () => {
@@ -374,8 +374,60 @@ function renderAgentPanels(state) {
 
   const prolog = document.getElementById('prologContent'); prolog.replaceChildren();
   const activity = state.prolog_activity || {};
-  if (activity.predicate) { prolog.append(row(activity.predicate, `Relevant facts: ${activity.facts ?? 0}`, (activity.rules || []).join(', '))); const proof = document.createElement('pre'); proof.className = 'proof'; proof.textContent = JSON.stringify(activity.proof || activity.result, null, 2); prolog.append(proof); }
+  const predicate = activity.predicate || activity.query;
+  if (predicate) { prolog.append(row(predicate, activity.facts_source || `Relevant facts: ${activity.facts ?? 0}`, (activity.rules || []).join(', '))); const proof = document.createElement('pre'); proof.className = 'proof'; proof.textContent = JSON.stringify(activity.proof || activity.result || activity.explanations, null, 2); prolog.append(proof); }
   else prolog.textContent = 'No predicate invoked yet.';
+
+  renderMessaging(state.telegram || {});
+}
+
+function renderMessaging(telegram) {
+  const container = document.getElementById('messagingContent'); container.replaceChildren();
+  const connection = telegram.connected ? 'Connected' : telegram.configured ? 'Offline' : 'Disabled';
+  container.append(row(connection, telegram.bot ? `@${telegram.bot}` : '', telegram.error || ''));
+  if (telegram.owner) container.append(row('Owner', telegram.owner.display_name || String(telegram.owner.user_id)));
+  else {
+    const pair = document.createElement('button'); pair.textContent = 'Create pairing code';
+    pair.disabled = !telegram.configured || !telegram.enabled;
+    if (pair.disabled) pair.title = 'Enable Telegram and add a BotFather token in .env first.';
+    pair.onclick = async () => {
+      busy(pair, true);
+      try {
+        const result = await api('/api/telegram/pair-code', {method:'POST'});
+        const item = row(`Pair code ${result.code}`, `Expires ${new Date(result.expires_at).toLocaleTimeString()}`);
+        container.append(item); feedback('Telegram pairing code created');
+      } catch (error) { feedback(error.message, true); }
+      finally { busy(pair, false); }
+    };
+    container.append(pair);
+  }
+  for (const contact of telegram.contacts || []) {
+    const item = row(contact.alias || contact.display_name || String(contact.user_id), contact.role, contact.active ? 'active' : 'pending');
+    if (contact.role === 'pending') {
+      const controls = document.createElement('div'); controls.className = 'telegram-contact-actions';
+      const alias = document.createElement('input'); alias.placeholder = 'Contact alias'; alias.maxLength = 80;
+      const add = document.createElement('button'); add.textContent = 'Add';
+      add.onclick = async () => { if (!alias.value.trim()) return alias.focus(); try { await api(`/api/telegram/contacts/${contact.user_id}/approve`, {method:'POST', body:JSON.stringify({alias:alias.value.trim()})}); feedback('Telegram contact added'); await refreshState(); } catch (error) { feedback(error.message, true); } };
+      const reject = document.createElement('button'); reject.textContent = 'Reject';
+      reject.onclick = async () => { try { await api(`/api/telegram/contacts/${contact.user_id}`, {method:'DELETE'}); feedback('Telegram contact rejected'); await refreshState(); } catch (error) { feedback(error.message, true); } };
+      controls.append(alias, add, reject); item.append(controls);
+    }
+    container.append(item);
+  }
+  for (const draft of (telegram.drafts || []).filter(item => item.status === 'pending')) {
+    const item = row(`To ${draft.recipient_alias}`, draft.content, `Expires ${new Date(draft.expires_at).toLocaleTimeString()}`);
+    const controls = document.createElement('div'); controls.className = 'agent-actions';
+    for (const action of ['approve', 'cancel']) {
+      const button = document.createElement('button'); button.textContent = action === 'approve' ? 'Send' : 'Cancel';
+      button.onclick = async () => { try { await api(`/api/telegram/drafts/${draft.id}/${action}`, {method:'POST'}); feedback(action === 'approve' ? 'Telegram message sent' : 'Telegram draft cancelled'); await refreshState(); } catch (error) { feedback(error.message, true); } };
+      controls.append(button);
+    }
+    item.append(controls); container.append(item);
+  }
+  for (const delivery of (telegram.deliveries || []).slice(0, 8)) {
+    const label = delivery.kind.replaceAll('_', ' ');
+    container.append(row(label, delivery.content, delivery.status === 'failed' ? delivery.error : delivery.status));
+  }
 }
 document.getElementById('listen').addEventListener('click', async event => {
   const button = event.currentTarget;
@@ -577,7 +629,7 @@ function connectEvents() {
     }
     if (packet.type === 'reminder.fired') { highlightedReminder = packet.data.reminder.id; addMessage(`Reminder: ${packet.data.reminder.text}`); feedback(`Reminder: ${packet.data.reminder.text}`); }
     if (packet.type === 'routine.retrying') feedback('Reminder service is retrying after a database delay', true);
-    if (['assistant.state','voice.state','wake.detected','wake.result','index.progress','alarm.created','alarm.fired','reminder.created','reminder.updated','reminder.fired','schedule.item.created','schedule.plan.preview','schedule.plan.applied','schedule.plan.discarded','preference.learned','preference.observed','preference.forgotten','research.completed','prolog.result'].includes(packet.type)) refreshState();
+    if (['assistant.state','voice.state','wake.detected','wake.result','index.progress','alarm.created','alarm.fired','reminder.created','reminder.updated','reminder.fired','schedule.item.created','schedule.plan.preview','schedule.plan.applied','schedule.plan.discarded','preference.learned','preference.observed','preference.forgotten','research.completed','prolog.result','telegram.connected','telegram.error','telegram.owner.paired','telegram.contact.approved','telegram.contact.revoked','telegram.draft.created','telegram.draft.sent','telegram.draft.cancelled','telegram.draft.failed'].includes(packet.type)) refreshState();
     if (packet.type === 'alarm.fired') addMessage(`${packet.data.alarm.label}. Would you like five more minutes?`);
   };
   socket.onclose = () => setTimeout(connectEvents, 1200);

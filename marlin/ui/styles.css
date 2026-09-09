@@ -87,12 +87,15 @@ button.primary, button.run { background: #183e48; border-color: #43a99d; }
 #memoryPanel { transform: translateX(6%); }
 #researchPanel { left: auto; right: 18px; top: 124px; }
 #prologPanel { left: 18px; top: 124px; }
+#messagingPanel { left: 50%; top: 300px; transform: translateX(-50%); }
 .panel-content { padding: 10px; max-height: 52vh; overflow: auto; color: #bdccd7; font-size: 12px; line-height: 1.45; }
 .agent-row { padding: 8px 0; border-bottom: 1px solid rgba(78,111,131,.3); }
 .agent-row:last-child { border-bottom: 0; }
 .agent-row strong { display: block; color: #eef6fa; }
 .agent-row small { color: #8fa3af; }
 .agent-actions { display: flex; gap: 6px; margin-top: 9px; }
+.telegram-contact-actions { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 6px; margin-top: 8px; }
+.telegram-contact-actions input { min-width: 0; border: 1px solid #394842; border-radius: 6px; background: #091016; color: #edf5f9; padding: 6px 8px; }
 .source-link { color: #71d3c2; text-decoration: none; }
 .source-link:hover { text-decoration: underline; }
 .proof { white-space: pre-wrap; overflow-wrap: anywhere; color: #a9c7bc; font-family: Consolas, monospace; font-size: 11px; }

@@ -82,7 +82,9 @@ def test_natural_high_priority_prolog_question_bypasses_ollama(tmp_path, monkeyp
 
     assert result["ok"]
     assert result["data"]["prolog_activity"]["query"] == "high_priority(Task)"
+    assert result["data"]["prolog_activity"]["predicate"] == "high_priority/1"
     assert result["data"]["prolog_activity"]["engine"] == "SWI-Prolog via PySWIP"
+    assert runtime.status()["prolog_activity"]["matched_task_ids"]
     assert "Prolog activity" in result["message"]
 
 
@@ -121,6 +123,13 @@ def test_priority_explanation_with_graph_in_task_id_reaches_prolog(tmp_path, mon
     assert "Finish graph interface is high priority because" in result["message"]
     assert "soon deadline" in result["message"]
     assert "graph_summary" not in result["data"]
+    assert result["data"]["prolog_activity"]["query"] == (
+        "explain_high_priority(task_finish_graph_interface, Reason)"
+    )
+    assert result["data"]["prolog_activity"]["predicate"] == "explain_high_priority/2"
+    assert runtime.status()["prolog_activity"]["matched_task_ids"] == [
+        "task_finish_graph_interface"
+    ]
 
 
 def test_local_model_error_is_clear_and_other_commands_still_work(tmp_path, monkeypatch):
