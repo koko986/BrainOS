@@ -346,6 +346,16 @@ def create_app(runtime: MarlinRuntime | None = None) -> FastAPI:
         require_token(x_marlin_token)
         return marlin.store.telegram_contacts()
 
+    @app.delete('/api/telegram/owner')
+    def telegram_unpair_owner(
+        x_marlin_token: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        require_token(x_marlin_token)
+        try:
+            return marlin.telegram.unpair_owner()
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
     @app.post('/api/telegram/contacts/{user_id}/approve')
     def telegram_approve_contact(
         user_id: int, body: TelegramContactBody, x_marlin_token: str | None = Header(default=None)

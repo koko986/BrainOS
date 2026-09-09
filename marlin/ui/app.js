@@ -385,8 +385,25 @@ function renderMessaging(telegram) {
   const container = document.getElementById('messagingContent'); container.replaceChildren();
   const connection = telegram.connected ? 'Connected' : telegram.configured ? 'Offline' : 'Disabled';
   container.append(row(connection, telegram.bot ? `@${telegram.bot}` : '', telegram.error || ''));
-  if (telegram.owner) container.append(row('Owner', telegram.owner.display_name || String(telegram.owner.user_id)));
-  else {
+  if (telegram.owner) {
+    const owner = row('Owner', telegram.owner.display_name || String(telegram.owner.user_id));
+    const remove = document.createElement('button');
+    remove.className = 'danger';
+    remove.textContent = 'Remove owner';
+    remove.onclick = async () => {
+      const name = telegram.owner.display_name || 'this Telegram account';
+      if (!window.confirm(`Remove ${name} as the MARLIN Telegram owner? Remote commands will stop immediately.`)) return;
+      busy(remove, true);
+      try {
+        await api('/api/telegram/owner', {method:'DELETE'});
+        feedback('Telegram owner removed');
+        await refreshState();
+      } catch (error) { feedback(error.message, true); }
+      finally { busy(remove, false); }
+    };
+    owner.append(remove);
+    container.append(owner);
+  } else {
     const pair = document.createElement('button'); pair.textContent = 'Create pairing code';
     pair.disabled = !telegram.configured || !telegram.enabled;
     if (pair.disabled) pair.title = 'Enable Telegram and add a BotFather token in .env first.';
@@ -629,7 +646,7 @@ function connectEvents() {
     }
     if (packet.type === 'reminder.fired') { highlightedReminder = packet.data.reminder.id; addMessage(`Reminder: ${packet.data.reminder.text}`); feedback(`Reminder: ${packet.data.reminder.text}`); }
     if (packet.type === 'routine.retrying') feedback('Reminder service is retrying after a database delay', true);
-    if (['assistant.state','voice.state','wake.detected','wake.result','index.progress','alarm.created','alarm.fired','reminder.created','reminder.updated','reminder.fired','schedule.item.created','schedule.plan.preview','schedule.plan.applied','schedule.plan.discarded','preference.learned','preference.observed','preference.forgotten','research.completed','prolog.result','telegram.connected','telegram.error','telegram.owner.paired','telegram.contact.approved','telegram.contact.revoked','telegram.draft.created','telegram.draft.sent','telegram.draft.cancelled','telegram.draft.failed'].includes(packet.type)) refreshState();
+    if (['assistant.state','voice.state','wake.detected','wake.result','index.progress','alarm.created','alarm.fired','reminder.created','reminder.updated','reminder.fired','schedule.item.created','schedule.plan.preview','schedule.plan.applied','schedule.plan.discarded','preference.learned','preference.observed','preference.forgotten','research.completed','prolog.result','telegram.connected','telegram.error','telegram.owner.paired','telegram.owner.unpaired','telegram.contact.approved','telegram.contact.revoked','telegram.draft.created','telegram.draft.sent','telegram.draft.cancelled','telegram.draft.failed'].includes(packet.type)) refreshState();
     if (packet.type === 'alarm.fired') addMessage(`${packet.data.alarm.label}. Would you like five more minutes?`);
   };
   socket.onclose = () => setTimeout(connectEvents, 1200);

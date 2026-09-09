@@ -325,6 +325,15 @@ class ComputerActionService:
             command = str(args.get("command", "play_pause"))
             self._media_key(command)
             return ActionOutcome(True, f"Media command sent: {command.replace('_', ' ')}.")
+        if name == "set_volume":
+            level = int(args.get("level", 50))
+            if not 0 <= level <= 100:
+                raise ValueError("Volume must be between 0 and 100.")
+            self._set_volume(level)
+            return ActionOutcome(True, f"System volume set to approximately {level}%.", {"level": level})
+        if name == "lock_computer":
+            self._lock_computer()
+            return ActionOutcome(True, "Windows is locked.")
         if name == "open_camera":
             if args.get("_explicit_command") is not True:
                 return ActionOutcome(False, "Camera stayed closed because no explicit camera command was received.")
@@ -569,6 +578,24 @@ class ComputerActionService:
             raise ValueError(f"Unknown media command: {command}")
         ctypes.windll.user32.keybd_event(key, 0, 0, 0)
         ctypes.windll.user32.keybd_event(key, 0, 2, 0)
+
+    @classmethod
+    def _set_volume(cls, level: int) -> None:
+        if sys.platform != "win32":
+            raise ValueError("Volume controls are only available on Windows.")
+        # Windows volume keys move in roughly two-percent steps. Reset to zero,
+        # then raise to the requested level without invoking a shell process.
+        for _ in range(50):
+            cls._media_key("volume_down")
+        for _ in range(round(level / 2)):
+            cls._media_key("volume_up")
+
+    @staticmethod
+    def _lock_computer() -> None:
+        if sys.platform != "win32":
+            raise ValueError("Computer locking is only available on Windows.")
+        if not ctypes.windll.user32.LockWorkStation():
+            raise OSError("Windows did not accept the lock request.")
 
     @staticmethod
     def _open_windows_camera() -> None:

@@ -837,6 +837,25 @@ class MarlinStore:
             ).fetchone()
         return dict(row) if row else None
 
+    def unpair_telegram_owner(self) -> dict[str, Any] | None:
+        stamp = now_iso()
+        with self.connect() as connection:
+            owner = connection.execute(
+                "SELECT * FROM telegram_identities WHERE role='owner' AND active=1 LIMIT 1"
+            ).fetchone()
+            if owner is None:
+                return None
+            connection.execute(
+                "UPDATE telegram_identities SET role='pending',alias=NULL,active=0,updated_at=? "
+                "WHERE user_id=? AND role='owner'",
+                (stamp, int(owner["user_id"])),
+            )
+            connection.execute(
+                "UPDATE telegram_pair_codes SET used_at=? WHERE used_at IS NULL",
+                (stamp,),
+            )
+        return dict(owner)
+
     def request_telegram_contact(
         self, *, user_id: int, chat_id: int, display_name: str
     ) -> dict[str, Any]:

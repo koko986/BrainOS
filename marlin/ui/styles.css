@@ -94,6 +94,8 @@ button.primary, button.run { background: #183e48; border-color: #43a99d; }
 .agent-row strong { display: block; color: #eef6fa; }
 .agent-row small { color: #8fa3af; }
 .agent-actions { display: flex; gap: 6px; margin-top: 9px; }
+.agent-row .danger { margin-top: 8px; border-color: #784b55; color: #ffc4ce; background: #2b181d; }
+.agent-row .danger:hover { border-color: #b66b7a; background: #3a1d25; }
 .telegram-contact-actions { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 6px; margin-top: 8px; }
 .telegram-contact-actions input { min-width: 0; border: 1px solid #394842; border-radius: 6px; background: #091016; color: #edf5f9; padding: 6px 8px; }
 .source-link { color: #71d3c2; text-decoration: none; }

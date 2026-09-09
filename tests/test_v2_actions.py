@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from types import SimpleNamespace
 
 from marlin.actions import ComputerActionService
 from marlin.storage import MarlinStore
@@ -86,3 +87,27 @@ def test_apps_can_be_discovered_from_desktop_shortcuts(tmp_path, monkeypatch):
     assert ComputerActionService._app_command("desktop youtube") == str(youtube)
     assert ComputerActionService._app_command("the desktop youtube app") == str(youtube)
     assert ComputerActionService._app_command("genymotion") == str(genymotion)
+
+
+def test_absolute_volume_uses_bounded_windows_media_steps(tmp_path, monkeypatch):
+    actions = service(tmp_path)
+    keys: list[str] = []
+    monkeypatch.setattr(ComputerActionService, "_media_key", staticmethod(keys.append))
+
+    result = actions.invoke("set_volume", {"level": 50})
+
+    assert result.ok
+    assert keys == ["volume_down"] * 50 + ["volume_up"] * 25
+    assert not actions.invoke("set_volume", {"level": 101}).ok
+
+
+def test_lock_computer_uses_windows_lock_api(tmp_path, monkeypatch):
+    actions = service(tmp_path)
+    calls: list[bool] = []
+    fake_user32 = SimpleNamespace(LockWorkStation=lambda: calls.append(True) or 1)
+    monkeypatch.setattr("marlin.actions.ctypes.windll", SimpleNamespace(user32=fake_user32))
+
+    result = actions.invoke("lock_computer", {})
+
+    assert result.ok
+    assert calls == [True]

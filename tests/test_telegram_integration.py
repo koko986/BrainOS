@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 import time
 import pytest
 from fastapi.testclient import TestClient
@@ -22,12 +23,16 @@ class FakeTelegram:
         self.updates: list[dict] = []
         self.fail_send = False
         self.fail_get_me = 0
+        self.commands: list[dict[str, str]] = []
 
     def get_me(self):
         if self.fail_get_me:
             self.fail_get_me -= 1
             raise TelegramError("Telegram API request failed.")
         return {"id": 99, "username": "marlin_test_bot"}
+
+    def set_commands(self, commands):
+        self.commands = commands
 
     def get_updates(self, offset: int, timeout: int = 25):
         time.sleep(0.01)
@@ -111,6 +116,39 @@ def test_expired_pairing_code_is_rejected(tmp_path):
         )
     with pytest.raises(ValueError, match="invalid or expired"):
         store.pair_telegram_owner(code, user_id=1, chat_id=10, display_name="Owner")
+
+
+def test_local_unpair_revokes_owner_and_invalidates_unused_codes(tmp_path):
+    service, store, fake = bridge(tmp_path)
+    pair_owner(store)
+    stale_code = store.create_telegram_pair_code()["code"]
+
+    removed = service.unpair_owner()
+
+    assert removed == {"removed": True, "display_name": "Owner"}
+    assert store.telegram_owner() is None
+    assert fake.sent[-1]["chat_id"] == 10
+    assert "removed" in fake.sent[-1]["text"].lower()
+    with pytest.raises(ValueError, match="invalid or expired"):
+        store.pair_telegram_owner(
+            stale_code, user_id=2, chat_id=20, display_name="Replacement"
+        )
+
+    service._handle_message(private_message(1, 10, "/status", "Former owner"))
+    assert "cannot issue commands" in fake.sent[-1]["text"]
+
+    replacement_code = store.create_telegram_pair_code()["code"]
+    replacement = store.pair_telegram_owner(
+        replacement_code, user_id=2, chat_id=20, display_name="Replacement"
+    )
+    assert replacement["role"] == "owner"
+    assert replacement["user_id"] == 2
+
+
+def test_unpair_without_an_owner_is_rejected(tmp_path):
+    service, _, _ = bridge(tmp_path)
+    with pytest.raises(ValueError, match="not currently paired"):
+        service.unpair_owner()
 
 
 def test_unknown_user_becomes_pending_and_cannot_command(tmp_path):
@@ -229,16 +267,74 @@ def test_send_failure_is_audited_without_leaking_secret(tmp_path):
 
 def test_runtime_remote_surface_blocks_computer_tools_and_uses_toolless_chat(tmp_path, monkeypatch):
     runtime = MarlinRuntime(settings(tmp_path), start_background=False)
-    assert "blocked remotely" in runtime.telegram_command("open chrome")
-    assert "blocked remotely" in runtime.telegram_command("delete C:\\notes.txt")
     calls = []
+    def invoke(name, arguments):
+        calls.append((name, arguments))
+        return SimpleNamespace(message=f"ran {name}")
+    monkeypatch.setattr(runtime.actions, "invoke", invoke)
+    monkeypatch.setattr(runtime.actions, "can_open_app", lambda _app: True)
+    assert runtime.telegram_command("/open chrome") == "ran open_app"
+    assert runtime.telegram_command("/open vscode") == "ran open_app"
+    assert runtime.telegram_command("/open canva") == "ran open_app"
+    assert runtime.telegram_command("/camera open") == "ran open_camera"
+    assert runtime.telegram_command("/camera close") == "ran close_camera"
+    assert runtime.telegram_command("/play youtube relaxing music") == "ran play_youtube"
+    assert runtime.telegram_command("/volume 50") == "ran set_volume"
+    assert runtime.telegram_command("/pause") == "ran media_control"
+    assert runtime.telegram_command("/next") == "ran media_control"
+    assert runtime.telegram_command("/mute") == "ran media_control"
+    assert runtime.telegram_command("/open documents") == "ran open_path"
+    assert runtime.telegram_command("/lock") == "ran lock_computer"
+    assert [name for name, _ in calls] == [
+        "open_app", "open_app", "open_app", "open_camera", "close_camera", "play_youtube",
+        "set_volume", "media_control", "media_control", "media_control", "open_path", "lock_computer",
+    ]
+    monkeypatch.setattr(runtime.actions, "can_open_app", lambda _app: False)
+    assert runtime.telegram_command("/open youtube") == "ran open_url"
+    assert calls[-1] == ("open_url", {"site": "youtube"})
+    assert "blocked remotely" in runtime.telegram_command("open unknown application")
+    assert "blocked remotely" in runtime.telegram_command("delete C:\\notes.txt")
+    model_calls = []
     def chat(messages, **kwargs):
-        calls.append(kwargs)
+        model_calls.append(kwargs)
         return ModelTurn("Good day.", raw_message={"role": "assistant", "content": "Good day."})
     monkeypatch.setattr(runtime.model, "chat", chat)
     assert runtime.telegram_command("hello") == "Good day."
-    assert calls[0]["tools"] is None
+    assert model_calls[0]["tools"] is None
     runtime.shutdown()
+
+
+def test_owner_help_shows_persistent_remote_command_keyboard(tmp_path):
+    service, store, fake = bridge(tmp_path)
+    pair_owner(store)
+    service._handle_message(private_message(1, 10, "/help", "Owner"))
+    keyboard = fake.sent[-1]["reply_markup"]
+    labels = [button["text"] for row in keyboard["keyboard"] for button in row]
+    assert "/apps" in labels
+    assert "/camera" in labels
+    assert "/play youtube relaxing music" in labels
+    assert "/search report.pdf" in labels
+    assert keyboard["is_persistent"] is True
+
+
+def test_quick_action_menus_and_callbacks_use_hardcoded_commands(tmp_path):
+    service, store, fake = bridge(tmp_path)
+    pair_owner(store)
+    service._handle_message(private_message(1, 10, "/apps", "Owner"))
+    labels = [
+        button["text"] for row in fake.sent[-1]["reply_markup"]["inline_keyboard"]
+        for button in row
+    ]
+    assert {"Chrome", "VS Code", "Canva", "YouTube", "Firefox"}.issubset(labels)
+
+    service._handle_callback({"id": "open", "from": {"id": 1}, "data": "remote:open_canva"})
+    assert fake.callbacks[-1] == ("open", "Running MARLIN command...")
+    assert fake.sent[-1]["text"] == "safe:/open canva"
+
+    sent_count = len(fake.sent)
+    service._handle_callback({"id": "wrong", "from": {"id": 999}, "data": "remote:camera_open"})
+    assert len(fake.sent) == sent_count
+    assert "Only the paired" in fake.callbacks[-1][1]
 
 
 def test_local_command_creates_contact_draft_instead_of_calling_model(tmp_path, monkeypatch):
@@ -300,6 +396,26 @@ def test_telegram_web_api_requires_local_token_and_controls_draft(tmp_path):
     approved = client.post(f"/api/telegram/drafts/{draft_id}/approve", headers=headers)
     assert approved.status_code == 200
     assert approved.json()["status"] == "sent"
+    runtime.shutdown()
+
+
+def test_telegram_owner_can_only_be_unpaired_through_token_protected_local_api(tmp_path):
+    runtime = MarlinRuntime(settings(tmp_path), start_background=False)
+    runtime.telegram.transport = FakeTelegram()
+    pair_owner(runtime.store)
+    app = create_app(runtime)
+    client = TestClient(app)
+
+    assert client.delete("/api/telegram/owner").status_code == 403
+    response = client.delete(
+        "/api/telegram/owner", headers={"X-Marlin-Token": app.state.token}
+    )
+    assert response.status_code == 200
+    assert response.json()["removed"] is True
+    assert runtime.store.telegram_owner() is None
+    assert client.delete(
+        "/api/telegram/owner", headers={"X-Marlin-Token": app.state.token}
+    ).status_code == 404
     runtime.shutdown()
 
 

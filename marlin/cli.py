@@ -37,6 +37,7 @@ def build_parser() -> argparse.ArgumentParser:
     telegram = sub.add_parser("telegram", help="Pair and inspect the private Telegram bridge.")
     telegram_sub = telegram.add_subparsers(dest="telegram_command", required=True)
     telegram_sub.add_parser("pair", help="Create a one-use owner pairing code.")
+    telegram_sub.add_parser("unpair", help="Remove the currently paired Telegram owner.")
     telegram_sub.add_parser("status", help="Show Telegram configuration and pairing status.")
     telegram_sub.add_parser("contacts", help="List approved and pending Telegram contacts.")
     telegram_sub.add_parser("test", help="Send a test message to the paired owner.")
@@ -186,6 +187,14 @@ def run_telegram(runtime: MarlinRuntime, command: str) -> int:
             return 2
         print(f"Telegram pairing code: {pair['code']}")
         print(f"Send /pair {pair['code']} to your MARLIN bot before {pair['expires_at']}.")
+        return 0
+    if command == "unpair":
+        try:
+            removed = runtime.telegram.unpair_owner()
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        print(f"Removed Telegram owner: {removed['display_name']}")
         return 0
     if command == "status":
         status = runtime.telegram.status()

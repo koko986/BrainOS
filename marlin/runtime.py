@@ -486,12 +486,62 @@ class MarlinRuntime:
         """Execute the deliberately narrow remote Telegram command surface."""
         prompt = str(text or "").strip()
         command = " ".join(prompt.lower().split())
+        if command in {"/camera", "/camera open", "/open camera", "open camera"}:
+            return self.actions.invoke("open_camera", {"_explicit_command": True}).message
+        if command in {"/camera close", "/close camera", "close camera"}:
+            return self.actions.invoke("close_camera", {}).message
+        remote_folders = {
+            "desktop": Path.home() / "Desktop",
+            "documents": Path.home() / "Documents",
+            "downloads": Path.home() / "Downloads",
+        }
+        folder_match = re.fullmatch(r"/?open\s+(desktop|documents|downloads)", command)
+        if folder_match:
+            return self.actions.invoke(
+                "open_path", {"path": str(remote_folders[folder_match.group(1)])}
+            ).message
+        open_match = re.fullmatch(
+            r"/?open\s+(chrome|(?:visual studio )?code|vscode|canva|youtube|edge|"
+            r"firefox|notepad|calculator|explorer|discord|telegram)",
+            command,
+        )
+        if open_match:
+            target = open_match.group(1)
+            app = "vscode" if target in {"code", "visual studio code", "vscode"} else target
+            if target in {"canva", "youtube"} and not self.actions.can_open_app(app):
+                return self.actions.invoke("open_url", {"site": target}).message
+            return self.actions.invoke("open_app", {"app": app}).message
+        play_match = re.fullmatch(r"/?play\s+(?:youtube\s+)?(.+)", prompt, re.I | re.S)
+        if play_match:
+            query = play_match.group(1).strip()
+            if not query:
+                return "Use /play followed by a YouTube search, for example /play relaxing music."
+            return self.actions.invoke("play_youtube", {"query": query}).message
+        volume_match = re.fullmatch(r"/?volume\s+(\d{1,3})", command)
+        if volume_match:
+            level = int(volume_match.group(1))
+            if not 0 <= level <= 100:
+                return "Volume must be between 0 and 100."
+            return self.actions.invoke("set_volume", {"level": level}).message
+        if command in {"/pause", "pause"}:
+            return self.actions.invoke("media_control", {"command": "pause"}).message
+        remote_media = {
+            "/resume": "play", "resume": "play", "/stop": "stop", "stop media": "stop",
+            "/next": "next", "next": "next", "/previous": "previous", "previous": "previous",
+            "/mute": "mute", "mute": "mute", "/volume up": "volume_up",
+            "volume up": "volume_up", "/volume down": "volume_down", "volume down": "volume_down",
+        }
+        if command in remote_media:
+            return self.actions.invoke("media_control", {"command": remote_media[command]}).message
+        if command in {"/lock", "lock", "lock computer", "lock my computer"}:
+            return self.actions.invoke("lock_computer", {}).message
         blocked = (
             "open ", "close ", "delete ", "move ", "rename ", "edit ", "write ",
             "create file", "create folder", "camera", "powershell", "command prompt",
             "cmd ", "shell ", "turn off", "shutdown", "play ", "volume ",
         )
-        if command.startswith(blocked):
+        blocked_command = command.removeprefix("/")
+        if blocked_command.startswith(blocked):
             return "That computer action is blocked remotely. Run it from the local MARLIN cockpit."
         if command in {"/status", "status"}:
             model = self.model.health()

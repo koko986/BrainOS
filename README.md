@@ -48,6 +48,7 @@ Pair the owner account with a one-use code:
 
 ```powershell
 py main.py telegram pair
+py main.py telegram unpair
 py main.py telegram status
 py main.py telegram contacts
 py main.py telegram test
@@ -60,10 +61,38 @@ in the cockpit or with `/name USER_ID Alias`. `tell Alex I will arrive at eight`
 creates a two-minute draft with **Send** and **Cancel** controls. It never sends
 before owner approval.
 
+The Telegram owner can only be removed locally: open the cockpit's Messaging
+panel and choose **Remove owner**, or run `py main.py telegram unpair`. This
+immediately revokes remote command access and invalidates unused pairing codes.
+
 Telegram can read safe status, reasoning, reminders, schedules, graph summaries,
-and filtered file-search results. Remote app, camera, shell, and file-changing
-commands are blocked. Interactive Telegram access and alerts run only while
-MARLIN is open; local Windows reminder delivery remains separate.
+and filtered file-search results. Apps outside the remote allow-list, shell,
+and file-changing commands are blocked. Camera commands only open or close the
+local Windows Camera app; no image or video is sent to Telegram. Interactive
+Telegram access and alerts run only while MARLIN is open; local Windows reminder
+delivery remains separate.
+
+The paired owner receives a compact Telegram keyboard with Apps, Media, Camera,
+and Files menus. Those menus provide tappable controls for:
+
+```text
+/open chrome|vscode|canva|youtube|edge|firefox|notepad|calculator|explorer
+/open desktop|documents|downloads
+/camera open
+/camera close
+/play youtube relaxing music
+/volume 0-100
+/pause  /next  /previous  /mute
+/search report.pdf
+/reminders
+/priority
+/lock
+```
+
+Only the listed applications and folders may be opened remotely. Camera actions
+open or close the local Windows Camera app; they never transmit camera content
+through Telegram. Shutdown, arbitrary applications, shell commands, and file
+modifications remain blocked. `/lock` locks the Windows session immediately.
 
 The desktop cockpit opens the native `pywebview` window when available and
 falls back to the browser at `http://127.0.0.1:8765`.

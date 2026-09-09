@@ -17,12 +17,49 @@ from marlin.events import EventBus
 from marlin.storage import MarlinStore
 
 
+REMOTE_CALLBACK_COMMANDS = {
+    "open_chrome": "/open chrome",
+    "open_vscode": "/open vscode",
+    "open_canva": "/open canva",
+    "open_youtube": "/open youtube",
+    "open_edge": "/open edge",
+    "open_firefox": "/open firefox",
+    "open_notepad": "/open notepad",
+    "open_calculator": "/open calculator",
+    "open_explorer": "/open explorer",
+    "open_documents": "/open documents",
+    "open_downloads": "/open downloads",
+    "camera_open": "/camera open",
+    "camera_close": "/camera close",
+    "play_music": "/play youtube relaxing music",
+    "media_pause": "/pause",
+    "media_next": "/next",
+    "media_previous": "/previous",
+    "media_mute": "/mute",
+    "volume_30": "/volume 30",
+    "volume_50": "/volume 50",
+    "volume_70": "/volume 70",
+    "show_reminders": "/reminders",
+    "show_priority": "/priority",
+    "show_status": "/status",
+}
+
+
 class TelegramError(RuntimeError):
     pass
 
 
+def _enable_windows_trust_store() -> None:
+    try:
+        import truststore
+        truststore.inject_into_ssl()
+    except (ImportError, OSError):
+        pass
+
+
 class TelegramTransport(Protocol):
     def get_me(self) -> dict[str, Any]: ...
+    def set_commands(self, commands: list[dict[str, str]]) -> None: ...
     def get_updates(self, offset: int, timeout: int = 25) -> list[dict[str, Any]]: ...
     def send_message(
         self, chat_id: int, text: str, reply_markup: dict[str, Any] | None = None
@@ -34,6 +71,7 @@ class TelegramHTTPTransport:
     """Minimal Bot API client whose exceptions never expose the bot token."""
 
     def __init__(self, token: str):
+        _enable_windows_trust_store()
         self._base = f"https://api.telegram.org/bot{token}"
 
     def _call(self, method: str, payload: dict[str, Any], *, timeout: int = 35) -> Any:
@@ -55,6 +93,9 @@ class TelegramHTTPTransport:
 
     def get_me(self) -> dict[str, Any]:
         return dict(self._call("getMe", {}))
+
+    def set_commands(self, commands: list[dict[str, str]]) -> None:
+        self._call("setMyCommands", {"commands": commands})
 
     def get_updates(self, offset: int, timeout: int = 25) -> list[dict[str, Any]]:
         result = self._call(
@@ -161,6 +202,31 @@ class TelegramBridge:
             raise TelegramError("Enable Telegram and add a BotFather token before pairing.")
         return self.store.create_telegram_pair_code()
 
+    def unpair_owner(self) -> dict[str, Any]:
+        owner = self.store.telegram_owner()
+        if owner is None:
+            raise ValueError("A Telegram owner is not currently paired.")
+        if self.transport:
+            try:
+                self.transport.send_message(
+                    int(owner["chat_id"]),
+                    "This Telegram account was removed as the MARLIN owner from the local cockpit.",
+                )
+            except TelegramError:
+                pass
+        removed = self.store.unpair_telegram_owner()
+        if removed is None:
+            raise ValueError("A Telegram owner is not currently paired.")
+        self.store.record_action(
+            "telegram_unpair", "Remove Telegram owner", str(removed.get("display_name") or "owner"), "complete"
+        )
+        result = {
+            "removed": True,
+            "display_name": str(removed.get("display_name") or "Telegram owner"),
+        }
+        self.events.publish("telegram.owner.unpaired", owner=result)
+        return result
+
     def create_draft(self, alias: str, content: str) -> dict[str, Any]:
         if not self.settings.telegram_enabled or self.transport is None:
             raise TelegramError("Telegram is disabled or not configured.")
@@ -241,6 +307,7 @@ class TelegramBridge:
                 if not self._bot_name:
                     me = self.transport.get_me()
                     self._bot_name = str(me.get("username") or me.get("first_name") or "MARLIN")
+                    self.transport.set_commands(self._bot_commands())
                     self.events.publish("telegram.connected", bot=self._bot_name)
                 for update in self.transport.get_updates(offset):
                     update_id = int(update.get("update_id") or 0)
@@ -309,7 +376,9 @@ class TelegramBridge:
                 paired = self.store.pair_telegram_owner(
                     text.split(maxsplit=1)[1], user_id=user_id, chat_id=chat_id, display_name=name
                 )
-                self.transport.send_message(chat_id, "Telegram is paired. You are MARLIN's owner.")
+                self.transport.send_message(
+                    chat_id, "Telegram is paired. You are MARLIN's owner.", self._command_keyboard()
+                )
                 self.events.publish("telegram.owner.paired", owner={"user_id": paired["user_id"], "display_name": paired["display_name"]})
             except ValueError as exc:
                 self.transport.send_message(chat_id, str(exc))
@@ -334,8 +403,13 @@ class TelegramBridge:
     def _handle_owner_text(self, owner: dict[str, Any], text: str) -> None:
         chat_id = int(owner["chat_id"])
         lower = text.lower().strip()
-        if lower in {"/start", "/help"}:
-            self.transport.send_message(chat_id, self._help_text())
+        if lower in {"/start", "/help", "/menu"}:
+            self.transport.send_message(chat_id, self._help_text(), self._command_keyboard())
+            return
+        quick_menu = self._quick_action_menu(lower)
+        if quick_menu is not None:
+            title, markup = quick_menu
+            self.transport.send_message(chat_id, title, markup)
             return
         name_match = re.fullmatch(r"/name\s+(\d+)\s+(.+)", text, re.I)
         if name_match:
@@ -384,6 +458,18 @@ class TelegramBridge:
             elif data.startswith("contact:reject:"):
                 self.store.reject_telegram_contact(int(data.rsplit(":", 1)[1]))
                 text = "Contact request rejected."
+            elif data.startswith("remote:"):
+                command = REMOTE_CALLBACK_COMMANDS.get(data.split(":", 1)[1])
+                if command is None:
+                    raise ValueError("That remote shortcut is not allowed.")
+                if callback_id and self.transport:
+                    self.transport.answer_callback(callback_id, "Running MARLIN command...")
+                    callback_id = ""
+                result = self.remote_command(command)
+                owner = self.store.telegram_owner()
+                if owner and self.transport:
+                    self.transport.send_message(int(owner["chat_id"]), result[:4096])
+                text = "Command complete."
             else:
                 text = "That Telegram action is not supported."
         except Exception as exc:
@@ -481,9 +567,99 @@ class TelegramBridge:
     @staticmethod
     def _help_text() -> str:
         return (
-            "MARLIN remote commands:\n/status /briefing /reminders /schedule /priority "
-            "/graph /search topic /research topic /contacts /send Alias message"
+            "MARLIN remote controls are ready. Tap Apps, Media, Camera, or Files below.\n\n"
+            "Commands: /open app, /play topic, /volume 0-100, /pause, /next, "
+            "/previous, /mute, /lock, /status, /briefing, /reminders, /schedule, "
+            "/priority, /graph, /search topic, /research topic, /contacts, "
+            "/send Alias message"
         )
+
+    @staticmethod
+    def _bot_commands() -> list[dict[str, str]]:
+        return [
+            {"command": "menu", "description": "Show tappable MARLIN controls"},
+            {"command": "apps", "description": "Open the application menu"},
+            {"command": "media", "description": "Show music and volume controls"},
+            {"command": "camera", "description": "Open or close the local camera"},
+            {"command": "files", "description": "Show folder and search controls"},
+            {"command": "open", "description": "Open an allow-listed app"},
+            {"command": "play", "description": "Play a YouTube search"},
+            {"command": "volume", "description": "Set volume from 0 to 100"},
+            {"command": "pause", "description": "Pause or resume media"},
+            {"command": "next", "description": "Play the next media item"},
+            {"command": "previous", "description": "Play the previous media item"},
+            {"command": "mute", "description": "Mute or unmute Windows"},
+            {"command": "search", "description": "Search indexed files"},
+            {"command": "reminders", "description": "Show pending reminders"},
+            {"command": "priority", "description": "Show Prolog priorities"},
+            {"command": "lock", "description": "Lock this Windows computer"},
+            {"command": "status", "description": "Show MARLIN status"},
+            {"command": "help", "description": "Show all safe commands"},
+        ]
+
+    @staticmethod
+    def _command_keyboard() -> dict[str, Any]:
+        return {
+            "keyboard": [
+                [{"text": "/apps"}, {"text": "/media"}],
+                [{"text": "/camera"}, {"text": "/files"}],
+                [{"text": "/play youtube relaxing music"}, {"text": "/pause"}],
+                [{"text": "/reminders"}, {"text": "/priority"}],
+                [{"text": "/search report.pdf"}, {"text": "/status"}],
+            ],
+            "resize_keyboard": True,
+            "is_persistent": True,
+            "input_field_placeholder": "Command MARLIN",
+        }
+
+    @staticmethod
+    def _quick_action_menu(command: str) -> tuple[str, dict[str, Any]] | None:
+        menus: dict[str, tuple[str, list[list[tuple[str, str]]]]] = {
+            "/apps": (
+                "Choose an application to open on this computer.",
+                [
+                    [("Chrome", "open_chrome"), ("VS Code", "open_vscode")],
+                    [("Canva", "open_canva"), ("YouTube", "open_youtube")],
+                    [("Edge", "open_edge"), ("Firefox", "open_firefox")],
+                    [("Notepad", "open_notepad"), ("Calculator", "open_calculator")],
+                    [("Explorer", "open_explorer")],
+                ],
+            ),
+            "/media": (
+                "Choose a media control.",
+                [
+                    [("Play music", "play_music"), ("Pause / resume", "media_pause")],
+                    [("Previous", "media_previous"), ("Next", "media_next")],
+                    [("Volume 30%", "volume_30"), ("Volume 50%", "volume_50"), ("Volume 70%", "volume_70")],
+                    [("Mute", "media_mute")],
+                ],
+            ),
+            "/camera": (
+                "The camera stays local; Telegram receives no image or video.",
+                [[("Open camera", "camera_open"), ("Close camera", "camera_close")]],
+            ),
+            "/files": (
+                "Open a local folder or use /search followed by a filename.",
+                [
+                    [("Documents", "open_documents"), ("Downloads", "open_downloads")],
+                    [("Reminders", "show_reminders"), ("Priorities", "show_priority")],
+                    [("MARLIN status", "show_status")],
+                ],
+            ),
+        }
+        selected = menus.get(command)
+        if selected is None:
+            return None
+        title, rows = selected
+        return title, {
+            "inline_keyboard": [
+                [
+                    {"text": label, "callback_data": f"remote:{action}"}
+                    for label, action in row
+                ]
+                for row in rows
+            ]
+        }
 
     @staticmethod
     def _safe_error(exc: Exception) -> str:
